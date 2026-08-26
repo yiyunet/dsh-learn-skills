@@ -1,9 +1,9 @@
-# DSH learn-* 技能包（知识体系方法论）
+# DSH learn-skills（知识体系方法论）
 
 一套可在 DeepSeek Harness（DSH）里「一句话搭建知识体系框架」的技能族。
 
 ## 这是什么
-`learn-*` 是「学任何工具 / 建任何领域知识库」通用的方法论技能，把
+`learn-skills` 是「学任何工具 / 建任何领域知识库」通用的方法论技能，把
 **收集 → 提炼 → 关联 → 升级 → 沉淀 → 复用** 的六步流水线做成可复用技能。
 
 ## 技能清单
@@ -42,10 +42,10 @@ cd dsh-learn-skills
 ./install.sh        # macOS/Linux
 # Windows PowerShell： .\install.ps1
 ```
-脚本会把 `skills/` 下所有 `learn-*` 复制到 `~/.dsh/skills/`。
+脚本会把 `skills/` 下所有 `learn-skills` 复制到 `~/.dsh/skills/`。
 
 ### 方式二：手动安装
-把 `skills/learn-*/` 整个目录复制到 `~/.dsh/skills/`（全局）或 `<工作区>/.dsh/skills/`（仅该工作区）。
+把 `skills/learn-skills/` 整个目录复制到 `~/.dsh/skills/`（全局）或 `<工作区>/.dsh/skills/`（仅该工作区）。
 
 ## 使用（安装后请【新建会话】再触发）
 - 「**搭建知识体系框架，主题是跨境选品**」→ learn-scaffold 生成完整框架
