@@ -18,6 +18,7 @@
 | learn-upgrade | 升级 framework.md 索引 + 刷 AGENTS.md（大脑） |
 | learn-skillify | 把流程沉淀为新技能 |
 | learn-web-collect | URL → inbox 标准化条目 |
+| learn-data | 本地数据表分析（read → grep → 聚合/占比 → 输出，含格式分档与转换引导） |
 
 ## 目录结构
 ```
