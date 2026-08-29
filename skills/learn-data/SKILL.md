@@ -24,7 +24,7 @@ user-invocable: true
    - `read` 调取 → 看表头、字段、行数。
    - `grep` 定位 → 按关键词/日期过滤相关行。
    - 筛选/聚合/占比 → 如按 `product` 过滤 + 日期窗口过滤后 `SUM(units)`；占比 = `SUM(条件值)/SUM(总值)`。
-   - 输出 → 聊天直接给「结论 + 计算过程」；需留档写 `reports/YYYY-MM-DD-主题-分析.md`（可被 session_search 检索）。
+   - 输出 → 聊天直接给「结论 + 计算过程」；需留档写 `reports/YYYY-MM-DD-主题-分析.md`（留档于工作区可 grep；会话原文留在 JSONL 可 resume 查阅）。
 4. **报告**：返回文件路径（如写入 reports/）或直接给结论。
 
 ## 数据约定（与 data/README.md 对齐）
