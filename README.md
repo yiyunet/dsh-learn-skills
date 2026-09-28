@@ -42,9 +42,20 @@
 - 已安装**源码版** deepseek-harness；
 - 已绑定工作区（工作区是知识落点，缺了它一切写入都无处可放）。
 
-### 方式 A：本地目录安装（当前可用的确定性路径）
+### 方式 A：从 npm 安装（**推荐**）
 
-在插件目录（仓库根）执行构建，然后把本地目录装进 web profile：
+```sh
+dsh plugin --profile web add @yiyunet/dsh-learn-skills
+```
+
+装完**重启 Host**（profile 的 `dsh.profile.bundles` 在启动时读取）。
+
+> ✅ **消费者不需要构建**：发布包里**自带 `lib/`**（见 `package.json` 的 `files` 白名单），
+> 所以从注册源安装是**一步到位**的。构建相关的命令只对**改源码的人**有意义，见方式 B。
+
+### 方式 B：本地目录安装（改源码 / 调试时用）
+
+`lib/` **不入版本库**（`.gitignore` 排除），所以**克隆下来必须构建**：
 
 ```sh
 npm install            # 只装 esbuild（构建期依赖）
@@ -54,11 +65,6 @@ npm test               # 真实行为测试
 npm run verify         # 发布契约断言
 ```
 
-> 📌 `npm install` 结束时**会自动构建一次**（`prepare` 钩子，钩子名 `scripts/postinstall.mjs`）。
-> 上面那句 `npm run build` 因此是**幂等的复跑**，不是必做步骤 —— 保留它是为了让"构建"
-> 在流程里**显式可见**。`lib/` **不入版本库**（`.gitignore` 排除），所以**克隆后必须构建**；
-> 而**发布包里自带 `lib/`**，从注册源安装的消费者**不需要**构建。
-
 ```sh
 # 把本机该目录装进 web profile（路径按你的实际位置替换）
 dsh plugin --profile web add link:<本仓库绝对路径>
@@ -66,29 +72,9 @@ dsh plugin --profile web add link:<本仓库绝对路径>
 pnpm add link:<本仓库绝对路径>
 ```
 
-装完**重启 Host**（profile 的 `dsh.profile.bundles` 在启动时读取）。
-
-### 方式 B：npm 公开安装
-
-本包声明了 `publishConfig.access: public`、`files` 白名单与 `prepublishOnly`，
-**具备发布条件**；但公开安装要等你执行发布之后才成立：
-
-```sh
-npm whoami             # ★ 认证哨兵：必须回显用户名才继续
-npm publish            # version = 2.2.0
-npm view @yiyunet/dsh-learn-skills version   # 回读确认，不凭终端印象
-```
-
-之后才是目标命令：
-
-```sh
-dsh plugin --profile web add @yiyunet/dsh-learn-skills
-```
-
-> ⚠️ **诚实声明**：本版本**未执行公开发布**。`dsh plugin --profile web add <包名>`
-> 依赖 pnpm 从注册源解析包名（源码依据：`packages/boot/plugin-manager/src/operations.ts`
-> 的 `runPluginCommand` → `runProfilePnpm` → `execa('pnpm', ['add', …])`），
-> 因此「包在不在注册源上」是公开安装成立的前提，而不是插件代码能自己满足的条件。
+> 📌 `npm install` 结束时**会自动构建一次**（`prepare` 钩子，钩子名 `scripts/postinstall.mjs`）。
+> 上面那句 `npm run build` 因此是**幂等的复跑**，不是必做步骤 —— 保留它是为了让"构建"
+> 在流程里**显式可见**。
 
 ### 检查装载是否成功
 
@@ -335,10 +321,11 @@ semanticBudgetMs: 60000     # 总预算；用尽即停，剩余候选走基线�
 ## 开发
 
 ```sh
+npm run static         # 免执行静态体检（import/符号/语法/白名单）
 npm run build          # 构建（宿主半侧复制 + 客户端 esbuild 打包 + 装载层自证）
 npm test               # node --test：真实行为测试（真跑文件系统）
 npm run verify         # 10 组发布契约断言
-npm run check          # build + test + verify
+npm run check          # ★ 上面四步一次跑完：static → build → test → verify
 npm run inspect        # 产物体检
 ```
 
@@ -350,6 +337,122 @@ npm run inspect        # 产物体检
 - 客户端半侧**只能引 react 系**（平台冻结模块表），第三方依赖一律不许进；
 - 客户端产物必须由 wrapper 把 bundle 嵌进 `__ModuleLoader__.load` 的 factory **内部** ——
   放在外面会在脚本顶层执行到 `require("react")`，整个 `/plugins` 拼接 bundle 会全灭。
+
+---
+
+## 排错
+
+按**症状**查。每条都给出"为什么"和"下一步"。
+
+### 装完看不到 `[📖] AI学习 ▾`
+
+| 检查 | 说明 |
+|---|---|
+| **重启 Host 了吗** | ★ **最常见的原因**。`dsh.profile.bundles` 在**启动时**读取，改完 profile 必须重启才生效 |
+| 装对 profile 了吗 | 必须是 `--profile web`（客户端半侧只在 web profile 注册） |
+| 包真的在吗 | `dsh plugin --profile web list`，或直接看 profile 的 bundles 列表 |
+
+### 菜单能弹，但点了报 `HTTP 404`
+
+报错形如 `transport failure for /api/dsh-learn-skills: HTTP 404`。
+
+**根因**：HTTP RPC 端点没注册上。`connection` 服务属于 **Web 运行时那一层**，
+在插件 `apply()` 那一刻**可能尚未就绪** ⇒ 注册机会被错过。
+
+**为什么本插件不该出这个问题**：它**不把 `connection` 写进静态 `inject`**（那会让插件在
+无 Web 运行时的部署里**整体 inactive**），而是**挂到它就绪之后**再注册。
+`npm run verify` 的 ⑤-b 组断言专门钉住这一点。
+
+⇒ 若你**确实**看到这个 404：把 `~/.dsh/` 下的宿主日志里 `learn-skills` 相关行发出来。
+
+### 点「初始预设」立刻报"无法读取宿主预设名册（agentPresets）"
+
+**这是刻意设计，不是 bug。** 拿不到名册就无法保证不生成重复的 `config.id`
+（官方明写"重复的 preset ID 会导致声明加载失败"）⇒ **宁可不落盘**。
+
+⇒ 此时**其余三个入口不受影响**，手工加预设照旧。
+
+### 点「确认创建」后提示"尚未安装"
+
+**这也是刻意的**（2.1.0 起**不代装**）：安装 bundle 会在 **Host 进程执行新代码**，
+官方入口 `plugin_manager` 为此强制弹 `danger-full-access` 审批，而服务方法
+`installBundle()` **本身没有审批闸** ⇒ 插件直接调它等于**替你越权**。
+
+⇒ 照提示跑那行 `dsh plugin --profile web add link:<该目录>`，或按 README
+「七个问题问了什么」末尾的说明操作。
+
+### 「收集提炼」产出为空或候选很少
+
+| 原因 | 判据 |
+|---|---|
+| 本次会话内容被判为**噪声** | 寒暄、空内容不计入（`isNoise`，宁可漏判） |
+| 这段消息**已被处理过** | 会标 `alreadyProcessed`，不重复创建 |
+| 会话历史**不完整** | 报告里会标"部分范围"；`historyComplete: false` 说明发生过 replace 压缩 |
+| 上限截断 | `stats` 里如实反映，不静默丢失 |
+
+### 语义增强（`allowModelSemantics`）没生效
+
+**默认就是关的**（打开会把**会话原文发给模型**，属数据出站，须显式开启）。
+
+打开后仍不生效时，按**降级纪律**逐条查 —— 以下任一都会**静默回退基线轨**（不抛错）：
+无模型 / 超时 / 输出不是合法 JSON / 超预算。批次文件里的 `semantic` 摘要会记
+"几次调用、几处分歧"，以及**是否跑完**（部分生效会明确标"未跑完"，不假装完成）。
+
+### 想确认"模型到底有没有在工作"
+
+判据只有一条 —— **宿主日志**：
+
+```
+第 N 题未由模型生成，已回退到通用候选：<原因>
+```
+
+看到它就说明那一轮是降级跑的。**别用"问题看起来够具体"当判据** —— 硬编码兜底候选
+里也有具体选项，没有区分力。
+
+### `npm run check` 报"缺少必需文件"或断言失败
+
+先看它**具体报哪一组**。10 组断言每组对应一个真实失败模式，
+`scripts/verify-package.mjs` 里每条都有注释说明"为什么钉这一条"。
+最常见的一类是 **`lib/` 与 `plugin-src/` 不同步** —— 改完源码**没重建**：
+
+```sh
+npm run build && npm run verify
+```
+
+---
+
+## 卸载
+
+### 第一步：摘掉插件
+
+```sh
+dsh plugin --profile web remove @yiyunet/dsh-learn-skills
+```
+
+或走 GUI：**设置 → 插件**，找到它移除。**改完重启 Host。**
+
+> ⚠️ 卸载只是"不再装载"，**不会删你的数据**。
+
+### 第二步（可选）：清掉插件留下的状态
+
+**都在工作区内**，插件**不写宿主配置**：
+
+| 路径 | 内容 | 删掉的后果 |
+|---|---|---|
+| `<工作区>/.dsh/learn-skills/` | 批次账 / 体检基线 / 变更日志 / 断点 / `known.json` | 丢"上次基线"与回滚依据；**知识节点本身不受影响** |
+| `<工作区>/.dsh/preset-bundles/<预设 id>/` | 本插件生成的**预设本体** | ⚠️ **会连带废掉对应预设**（宿主重启时解析不到定义，**该预设的会话会被拒绝恢复**） |
+
+> 🗑 **要删预设，请走四步法**，不要直接删目录 ——
+> 见 [`docs/删除预设.md`](docs/删除预设.md)：关行确认 → 卸包 → 删目录 → 清
+> `known.json` 占用。**同包多预设时不能卸整包**（会带走同包里所有预设）。
+
+### 第三步：你的知识库**不会**被删
+
+`AGENTS.md` / `index/` / `inbox/` / `knowledge/` / `data/` / `task/` / `reports/`
+都是**你的资产**，插件从不删它们。卸载后它们原样保留，可用任何工具继续使用。
+
+> 回滚写入而非整个卸载？用 `/learn rollback <批次号>` —— 它**只还原本插件写过的**，
+> 且**写入之后被你改过的文件一律不动**。
 
 ---
 

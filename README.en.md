@@ -40,10 +40,25 @@ The four functions have hard boundaries:
 - A **source** installation of deepseek-harness;
 - A bound workspace (the workspace is where knowledge lands; without it there is nowhere to write).
 
-### Option A — local directory (the deterministic path available today)
+### Option A — install from npm (**recommended**)
+
+```sh
+dsh plugin --profile web add @yiyunet/dsh-learn-skills
+```
+
+Restart the Host afterwards — `dsh.profile.bundles` is read at startup.
+
+> ✅ **Consumers do not build.** The published package **ships `lib/`** (see the `files`
+> allow-list in `package.json`), so installing from the registry is a one-liner. The build
+> commands below matter only to people **editing the source** (Option B).
+
+### Option B — local directory (for source work / debugging)
+
+`lib/` is **not** in version control (`.gitignore`), so a fresh clone **must** be built:
 
 ```sh
 npm install            # build-time dependency only (esbuild)
+npm run static         # static consistency check (no execution)
 npm run build          # plugin-src/ → lib/ (with loader self-proof)
 npm test               # real behaviour tests
 npm run verify         # release-contract assertions
@@ -55,31 +70,9 @@ dsh plugin --profile web add link:<absolute path to this repo>
 pnpm add link:<absolute path to this repo>
 ```
 
-Restart the Host afterwards — `dsh.profile.bundles` is read at startup.
-
-### Option B — public npm install
-
-The package declares `publishConfig.access: public`, a `files` allow-list and
-`prepublishOnly`, so it is **ready to publish**; public installation becomes true only
-after you publish:
-
-```sh
-npm whoami             # authentication sentinel: must print a username before continuing
-npm publish            # version = 2.2.0
-npm view @yiyunet/dsh-learn-skills version   # read back from the registry, do not trust the terminal
-```
-
-Then the target command works:
-
-```sh
-dsh plugin --profile web add @yiyunet/dsh-learn-skills
-```
-
-> ⚠️ **Honest statement**: this version has **not been published**. `dsh plugin add <name>`
-> resolves the name through pnpm against the registry (source: `runPluginCommand` →
-> `runProfilePnpm` → `execa('pnpm', ['add', …])` in
-> `packages/boot/plugin-manager/src/operations.ts`). Whether the package exists on a
-> registry is a precondition the plugin code itself cannot satisfy.
+> 📌 `npm install` **builds once automatically** at the end (the `prepare` hook, whose file
+> is `scripts/postinstall.mjs`). The `npm run build` above is therefore an **idempotent
+> re-run**, not a required step — it is kept so the build stays **visible** in the flow.
 
 ### Verifying the mount
 
@@ -297,10 +290,11 @@ this switch explicitly.
 ## Development
 
 ```sh
+npm run static         # static check, no execution (imports/symbols/syntax/allow-list)
 npm run build          # host half copy + client esbuild bundle + loader self-proof
 npm test               # node --test: real behaviour tests (real filesystem)
 npm run verify         # 10 release-contract assertion groups
-npm run check          # build + test + verify
+npm run check          # ★ all four in one: static → build → test → verify
 npm run inspect        # artifact inspection
 ```
 
@@ -315,6 +309,132 @@ Architecture conventions (aligned with the ecosystem baseline
 - The client artifact must be embedded **inside** the wrapper's `__ModuleLoader__.load`
   factory — placing it outside executes `require("react")` at script top level and takes
   down the whole concatenated `/plugins` bundle.
+
+---
+
+## Troubleshooting
+
+Look up your **symptom**. Each entry gives the "why" and the next step.
+
+### `[📖] AI Learning ▾` does not show up after installing
+
+| Check | Notes |
+|---|---|
+| **Did you restart the Host?** | ★ **The most common cause.** `dsh.profile.bundles` is read at **startup** |
+| Right profile? | It must be `--profile web` (the client half only registers in the web profile) |
+| Is the package really there? | `dsh plugin --profile web list`, or inspect the profile's bundles |
+
+### The menu opens, but clicking it returns `HTTP 404`
+
+The error looks like `transport failure for /api/dsh-learn-skills: HTTP 404`.
+
+**Root cause**: the HTTP RPC endpoint never got registered. The `connection` service belongs
+to the **Web runtime layer**, which may **not be ready** at the moment the plugin's `apply()`
+runs — so the registration window is missed.
+
+**Why this plugin should not hit it**: it deliberately keeps `connection` **out of the static
+`inject`** (which would make the plugin entirely inactive on deployments without a Web
+runtime) and instead **hooks registration onto "when it becomes ready"**. Assertion group ⑤-b
+in `npm run verify` pins exactly this.
+
+⇒ If you *do* see this 404, send the `learn-skills` lines from the host log under `~/.dsh/`.
+
+### Clicking "Initial preset" immediately reports "cannot read the host preset roster (agentPresets)"
+
+**This is by design, not a bug.** Without the roster there is no way to guarantee a
+non-duplicate `config.id` (the official docs state "duplicate preset IDs cause declaration
+loading to fail") ⇒ **it refuses to write anything rather than guess**.
+
+⇒ The **other three entries are unaffected**, and adding a preset manually still works.
+
+### After "Confirm create" it says "not installed yet"
+
+**Also deliberate** (since 2.1.0 it **does not self-install**): installing a bundle executes
+**new code in the Host process**. The official `plugin_manager` entry forces a
+`danger-full-access` approval for exactly this, while the service method `installBundle()`
+has **no approval gate** ⇒ calling it directly would **escalate on your behalf**.
+
+⇒ Run the `dsh plugin --profile web add link:<dir>` line it prints, or follow the note at the
+end of "What the seven questions ask".
+
+### "Capture & distil" produces nothing, or very few candidates
+
+| Cause | How to tell |
+|---|---|
+| The session content was judged **noise** | Greetings and empty content are excluded (`isNoise`, deliberately lenient) |
+| Those messages were **already processed** | Marked `alreadyProcessed`; nothing is re-created |
+| The session history is **incomplete** | The report marks "partial range"; `historyComplete: false` means a replace-compaction happened |
+| Truncated by the cap | Reflected truthfully in `stats`, never silently dropped |
+
+### Semantic enrichment (`allowModelSemantics`) has no effect
+
+**It is off by default** — enabling it sends **raw session text to a model** (data egress,
+so it must be switched on explicitly).
+
+Once enabled, walk the **degradation rules** — any of these **silently falls back to the
+baseline track** (never throwing): no model / timeout / output not valid JSON / over budget.
+The `semantic` summary in the batch file records how many calls happened, how many
+divergences were found, and **whether it finished** (partial runs are labelled, never faked).
+
+### Want to confirm "is the model actually doing anything?"
+
+There is exactly one criterion — the **host log**:
+
+```
+Question N was not generated by the model, fell back to a generic candidate: <reason>
+```
+
+Seeing it means that round ran degraded. **Do not use "the questions look specific enough"
+as the criterion** — the hardcoded fallbacks also contain specific options, so it has no
+discriminating power.
+
+### `npm run check` reports a missing required file, or an assertion fails
+
+Read **which group** it names. Each of the 10 assertion groups corresponds to a real failure
+mode, and each carries a comment in `scripts/verify-package.mjs` explaining why it is pinned.
+The most common class is **`lib/` being out of sync with `plugin-src/`** — source edited
+**without rebuilding**:
+
+```sh
+npm run build && npm run verify
+```
+
+---
+
+## Uninstalling
+
+### Step 1 — remove the plugin
+
+```sh
+dsh plugin --profile web remove @yiyunet/dsh-learn-skills
+```
+
+Or use the GUI: **Settings → Plugins**, find it and remove. **Restart the Host afterwards.**
+
+> ⚠️ Uninstalling only stops it loading. **Your data is not deleted.**
+
+### Step 2 (optional) — clear the state it left behind
+
+Everything lives **inside your workspace**; the plugin **never writes host config**:
+
+| Path | Contents | Cost of deleting |
+|---|---|---|
+| `<workspace>/.dsh/learn-skills/` | batch ledger / audit baseline / change journal / breakpoint / `known.json` | Loses the "last baseline" and rollback evidence; **knowledge nodes themselves are untouched** |
+| `<workspace>/.dsh/preset-bundles/<preset id>/` | the **preset body** this plugin generated | ⚠️ **Kills that preset** (the Host cannot resolve its definition at restart, and **sessions bound to it will be refused**) |
+
+> 🗑 **To delete a preset, follow the four-step procedure** rather than deleting the directory —
+> see [`docs/删除预设.md`](docs/删除预设.md) (Chinese): close the row → uninstall the bundle →
+> delete the directory → clear the `known.json` entry. **When several presets share one bundle,
+> do not uninstall the bundle** (it would take all of them down).
+
+### Step 3 — your knowledge base is **not** deleted
+
+`AGENTS.md` / `index/` / `inbox/` / `knowledge/` / `data/` / `task/` / `reports/` are **your
+assets**; the plugin never deletes them. They survive uninstalling and remain usable with any
+other tool.
+
+> Want to roll back a write rather than uninstall? Use `/learn rollback <batch id>` — it reverts
+> **only what this plugin wrote**, and **never touches files you edited afterwards**.
 
 ---
 
