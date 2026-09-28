@@ -1,0 +1,42 @@
+# 行尾规范化 —— 让 Windows / macOS / Linux 的检出结果一致
+#
+# 为什么需要它（实测背景）：
+#   本仓在 Windows 上 `git add` 时报了 50+ 条
+#   `warning: in the working copy of 'X', LF will be replaced by CRLF the next time Git touches it`。
+#   那句警告本身无害，但它暴露一个真风险：**没有本文件时，行尾取决于各人本机配置**
+#   （`core.autocrlf` 在 Windows 常为 true、macOS/Linux 常为 false）
+#   ⇒ 同一份提交在不同机器上检出成不同字节。
+#   对本仓尤其要紧，因为有几处断言是**按行**做的（构建期的占位符装配、verify 的残留检查）。
+#
+# `eol=lf` 的含义：**仓库里与检出的都用 LF**，与开发者本机平台无关。
+# 这不会自动改写既有文件，只约束 Git 后续的行为 —— 本仓尚无历史，正是设定的最佳时机。
+
+# 默认：交由 Git 按内容判断，并统一为 LF
+* text=auto eol=lf
+
+# 文本文件：显式锁定 LF
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+
+# 二进制文件：不许做任何行尾转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.svg   text eol=lf
+*.ico   binary
+*.tgz   binary
+*.zip   binary
+
+# Windows 批处理必须保持 CRLF，否则某些解析器会出错
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 发布产物：语言统计时不计入（避免 README 里的体积数字被误读成源码量）
+lib/**        linguist-generated=true
+package-lock.json  linguist-generated=true

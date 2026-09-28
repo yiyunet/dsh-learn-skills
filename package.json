@@ -1,0 +1,118 @@
+{
+  "name": "@yiyunet/dsh-learn-skills",
+  "version": "2.2.0",
+  "description": "DSH 插件：AI学习 —— 会话输入区的四入口学习插件（初始预设 / 收集提炼 / 关联升级 / 沉淀复用），把「收集→提炼→关联→升级→沉淀→复用」方法论做成有交互引导、预设管理、知识审核入库与体系体检的运行时能力。",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "learn",
+    "knowledge-management",
+    "agent-preset",
+    "workspace-scaffold",
+    "knowledge-audit",
+    "ai-learning"
+  ],
+  "author": {
+    "name": "yiyunet",
+    "url": "https://github.com/yiyunet"
+  },
+  "contributors": [
+    {
+      "name": "yiyunet",
+      "url": "https://github.com/yiyunet"
+    }
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yiyunet/dsh-learn-skills.git"
+  },
+  "homepage": "https://github.com/yiyunet/dsh-learn-skills#readme",
+  "bugs": {
+    "url": "https://github.com/yiyunet/dsh-learn-skills/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./lib/index.mjs",
+  "exports": {
+    ".": "./lib/index.mjs",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "docs",
+    "lib",
+    "plugin-src",
+    "scripts",
+    "LICENSE",
+    "CHANGELOG.md",
+    "README.md",
+    "README.en.md",
+    "package-lock.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    },
+    "compatibility": {
+      "dsh": "0.1.5-alpha.1 || 0.1.6-alpha.2 || 0.1.7-alpha.1",
+      "dshReleases": {
+        "0.1.2-alpha.4": "unknown",
+        "0.1.2-alpha.5": "unknown",
+        "0.1.2-rc.1": "unknown",
+        "0.1.3-alpha.1": "unknown",
+        "0.1.5-alpha.1": "unknown",
+        "0.1.6-alpha.2": "legacy-preset-dirs",
+        "0.1.7-alpha.1": "verified"
+      },
+      "profiles": [
+        "web"
+      ],
+      "note": "本字段是生态约定（dsh-im / dsh-dingtalk-connector 同形），**DSH 当前不强制**——官方 package-manifest 的运行时要求字段是 engines.dsh，且其自述为 'declarative until a reader enforces it'。因此这里只用于人读与排障。verified 仅指：本机检出的 base bundle 同时提供 user-questions 与 commands 两行，且 conversation.input.left 槽位已声明；**未在运行时实测**。"
+    }
+  },
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.1.5"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:host": "node scripts/build.mjs --host-only",
+    "build:client": "node scripts/build.mjs --client-only",
+    "test": "node --test test/*.test.mjs",
+    "verify": "node scripts/verify-package.mjs",
+    "inspect": "node scripts/inspect-bundle.mjs",
+    "static": "node scripts/static-check.mjs",
+    "check": "npm run static && npm run build && npm test && npm run verify",
+    "prepare": "node scripts/postinstall.mjs",
+    "prepublishOnly": "npm run check"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.9"
+  },
+  "directories": {
+    "lib": "lib",
+    "test": "test",
+    "doc": "docs"
+  }
+}

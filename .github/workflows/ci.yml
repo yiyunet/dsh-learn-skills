@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  check:
+    name: Test, build, and verify package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # ★ 为什么必须是 `npm ci` 而不是 `npm install`：
+      #   `npm ci` 的判据是 **lock 与 package.json 严格一致**，不一致即
+      #   `EUSAGE: … in sync`。这正是 CI 唯一能抓到、而本地抓不到的一类失败 ——
+      #   本地 `npm test` / `npm run build` / `npm run verify` **都不读 lock**。
+      #   （实测踩过：lock 停在 2.1.0 而 package.json 已 2.2.0，本地四关全绿、CI 首跑必红。）
+      #   现已修，且 `npm run verify` 的 ②-b 组断言会把该不一致**在本地就拦下**。
+      - name: Install dependencies
+        run: npm ci
+
+      # check = static → build → test → verify（见 package.json scripts）。
+      # ⚠️ `npm ci` 结束时会因 `prepare` 钩子构建一次 `lib/`；此处再跑一次 `check`
+      #    内的 build，是为了确保**断言基于本次 CI 的产物**，而非复用钩子的中间结果。
+      - name: Run checks
+        run: npm run check

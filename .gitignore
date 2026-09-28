@@ -1,0 +1,18 @@
+# 构建产物与本地临时物（真源在 plugin-src/，lib/ 由 `npm run build` 生成）
+lib/
+.lib-staging/
+.lib-backup/
+
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 日志与编辑器
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 发布产物
+*.tgz
