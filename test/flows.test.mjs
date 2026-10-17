@@ -151,6 +151,9 @@ function harness(options = {}) {
     //    静默的默认值会让"漏传"和"故意为空"长得一模一样。
     messages: options.messages ?? (options.noMessages === true ? [] : missingMessages()),
     historyComplete: options.historyComplete ?? true,
+    // 读统计（2.2.3 起 `sessionInfo` 会带）：不传就不出这个字段，旧用例的语义不变；
+    // 验「读不到消息」的用例显式给 `{ eventsRead: 0, messagesBuilt: 0, eventTypes: [] }`。
+    ...options.readStats === undefined ? {} : { readStats: options.readStats },
   })
   return {
     flows: createFlows({ config, ctx, sessionInfo, version: '2.2.0' }),
@@ -614,6 +617,132 @@ describe('入口二 · 收集提炼', () => {
     assert.equal(result.batchId, '001')
     assert.equal(existsSync(join(ws, 'knowledge/nodes')), false)
   })
+
+  it('★ 一条消息都没读到 ⇒ 直接失败并给出事件读数，不产空批次', async () => {
+    // 真机故障：读不到会话历史时旧实现照样"成功"产出一个 0 条候选的批次，
+    // 界面上只剩一张空表 + 「完整历史」。用户看到的是"没提炼出东西"，
+    // 实际是"一条都没读到"，而且盘上还堆着空批次。现在的判据：宁可不产。
+    const ws = await freshDir(join(root, 'ws-distill-noread'))
+    const { flows } = harness({
+      workspace: ws,
+      noMessages: true,
+      readStats: { eventsRead: 0, eventTypes: [], messagesBuilt: 0, textChars: 0 },
+      config: { presetRoot: sharedPresetRoot },
+    })
+    const result = await flows.distill({ sessionId: 'session-test' })
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'NO_MESSAGES')
+    assert.match(result.message, /没有读到本会话的任何消息/u)
+    // 事件读数是**唯一**能定位"是宿主没给历史，还是会话真没内容"的证据。
+    assert.match(result.message, /会话事件 0 条/u)
+    assert.equal(result.readStats?.eventsRead, 0)
+    // 读取路径与事件数**必须同框出现**：只给事件数时，"宿主没把历史接口给到插件"
+    // 与"会话里真的没有内容"分不开 —— 这正是 2.2.3 之前的困境。
+    assert.match(result.message, /读取路径/u)
+    // 不产批次：inbox 里不该出现候选文件。
+    assert.equal(existsSync(join(ws, 'inbox/.candidates-001.json')), false)
+    // 也不许留下断点：否则下一次点「收集提炼」会被 FLOW_RUNNING 挡住（比空表更难查）。
+    const session = await readText(join(ws, '.dsh/learn-skills/session.json'))
+    assert.equal(session === undefined || !/collecting/u.test(session), true, `断点没清干净：${session}`)
+  })
+
+  it('★ 分因一：宿主没有可识别的事件读取接口，不许说成"会话里没内容"', async () => {
+    // 0.2.1-rc.1 的 `Session` 没有 `events()`，只有 `snapshotEvents()`（真身已核到行）。
+    // 若哪天宿主再换 API，`eventsSource` 会是 `none` —— 这种情况最容易被误读成
+    // "会话是空的"，于是人去重开对话、重试、再看到同一张空表。三种原因必须分开说。
+    const ws = await freshDir(join(root, 'ws-distill-nosource'))
+    const { flows } = harness({
+      workspace: ws,
+      noMessages: true,
+      readStats: { eventsRead: 0, eventTypes: [], eventsSource: 'none', messagesBuilt: 0, textChars: 0 },
+      config: { presetRoot: sharedPresetRoot },
+    })
+    const result = await flows.distill({ sessionId: 'session-test' })
+    assert.equal(result.code, 'NO_MESSAGES')
+    assert.match(result.message, /没有提供可识别的事件读取接口/u)
+    assert.match(result.message, /读取路径 none/u)
+    assert.doesNotMatch(result.message, /会话里没有事件/u)
+  })
+
+  it('★ 分因二：读到了事件但类型不符 ⇒ 报出实际类型', async () => {
+    // 事件读到了、但一条都抽不成消息（类型名变了 / 文本抽不出）—— 与"没有事件"
+    // 完全是两回事。把实际类型打出来，下一次真机一眼可辨。
+    const ws = await freshDir(join(root, 'ws-distill-types'))
+    const { flows } = harness({
+      workspace: ws,
+      noMessages: true,
+      readStats: {
+        eventsRead: 5,
+        eventTypes: [{ type: 'tool/result', count: 5 }],
+        eventsSource: 'snapshotEvents',
+        messagesBuilt: 0,
+        textChars: 0,
+      },
+      config: { presetRoot: sharedPresetRoot },
+    })
+    const result = await flows.distill({ sessionId: 'session-test' })
+    assert.equal(result.code, 'NO_MESSAGES')
+    assert.match(result.message, /读到了事件但没有一条能抽成消息/u)
+    assert.match(result.message, /tool\/result×5/u)
+    assert.match(result.message, /读取路径 snapshotEvents/u)
+  })
+
+  it('★ 裁决问卷的形状：一题一条、单选、首项「保留（推荐）」', async () => {
+    // 真机症状：题干是 8 行原文堆成的墙，选项是多选且无默认 ⇒ `提交` 一直灰、点不了。
+    // 宿主判据（QuestionComposer.tsx:174-176）：**单选**且 options[0] 以「（推荐）」结尾时
+    // 会隐式预选 ⇒ 不改就是"保留"，提交随时可用。这条闸锁三件事，缺一就退回旧症状：
+    //   ① 一题一条（不再把 8 条塞进一道题的题干）
+    //   ② `multiSelect === false`（多选不预选、也不自动跳题）
+    //   ③ `options[0].label` 带「（推荐）」后缀（预选的唯一触发条件）
+    // 另锁"题干必须是一行"——它是"读不出来"的直接原因。
+    const ws = await freshDir(join(root, 'ws-distill-review-shape'))
+    const { flows, calls } = harness({
+      workspace: ws,
+      messages: [
+        { id: 'seq-1', seq: 1, role: 'user', text: '北美站的合规要求是要有 FCC 标识', sessionId: 's1' },
+        { id: 'seq-2', seq: 2, role: 'user', text: '步骤：先查类目，再填属性，最后提交', sessionId: 's1' },
+      ],
+      answers: [{ answers: [{ id: 'r', selected: ['全部保留'], custom: '' }] }],
+      config: { presetRoot: sharedPresetRoot },
+    })
+    const result = await flows.distill({ sessionId: 'session-test' })
+    assert.equal(result.ok, true)
+    const questions = calls[0]?.questions ?? []
+    assert.ok(questions.length >= 1, '裁决问卷没被问到：候选提取可能失败了，先查提取再查问卷形状')
+    for (const question of questions) {
+      assert.equal(question.multiSelect, false, '多选不预选、不自动跳题 —— 提交会一直灰')
+      assert.match(question.options[0].label, /（推荐）$/u)
+      assert.doesNotMatch(question.question, /\n/u, '题干必须是一行')
+      assert.ok(question.question.length <= 49, `题干应压到一行（≤49 字），实际 ${question.question.length}`)
+    }
+  })
+
+  it('★ 准入闸：首项即默认拒绝；没写下"要改的那一句" ⇒ 不写任何节点', async () => {
+    // 老板口径（逐字）：「本次要改 AGENTS.md 的哪一句？不改会导致 Agent 下次做错什么？
+    // 证据是本次会话的哪几条？」答不出来 ⇒ 不入库，**零产出是正确结果**。
+    // 锁两件事：① 准入排在裁决首题、且首项＝默认拒绝（不点＝不入库）；
+    // ② 没写出句子（≥8 字）时，一个知识节点都不许落盘。
+    const ws = await freshDir(join(root, 'ws-admission-deny'))
+    const { flows, calls } = harness({
+      workspace: ws,
+      messages: [
+        { id: 'seq-1', seq: 1, role: 'user', text: '北美站的合规要求是要有 FCC 标识', sessionId: 's1' },
+        { id: 'seq-2', seq: 2, role: 'user', text: '步骤：先查类目，再填属性，最后提交', sessionId: 's1' },
+      ],
+      answers: [{
+        answers: [
+          { id: 'admission', selected: ['本轮不入库（推荐）'], custom: '' },
+          { id: 'review-1', selected: ['保留（推荐）'], custom: '' },
+        ],
+      }],
+      config: { presetRoot: sharedPresetRoot },
+    })
+    await flows.distill({ sessionId: 'session-test' })
+    const gate = calls[0]?.questions?.[0]
+    assert.equal(gate?.header, '准入', '准入闸必须是裁决卡的第一题')
+    assert.match(gate?.options?.[0]?.label ?? '', /本轮不入库/u, '首项必须是默认拒绝（不点＝不入库）')
+    assert.equal(existsSync(join(ws, 'knowledge/nodes')), false, '没写下句子就不许落盘任何节点')
+  })
 })
 
 describe('入口三 · 关联升级', () => {
@@ -704,6 +833,35 @@ describe('入口三 · 关联升级', () => {
     assert.equal(result.ok, false)
     assert.equal(result.code, 'NO_BATCH')
     assert.match(result.message, /收集提炼/u)
+  })
+
+  it('★ 待处理批次全是 0 条候选 ⇒ 明确报 NO_CANDIDATES，不把人引到死路', async () => {
+    // 真机形态：三个批次都是 0 条候选（读不到消息的空跑）。旧版会让人选一个，
+    // 选完只说"没有可写入的变更"——用户仍然不知道为什么，也不知道该做什么。
+    const ws = await freshDir(join(root, 'ws-up-empty'))
+    await mkdir(join(ws, 'inbox'), { recursive: true })
+    await mkdir(join(ws, '.dsh/learn-skills'), { recursive: true })
+    const ids = ['001', '002']
+    await writeFile(join(ws, '.dsh/learn-skills/batches.json'), JSON.stringify({
+      version: 1,
+      batches: ids.map(batchId => ({
+        batchId, flow: 'distill', status: 'awaitingUpgrade', createdAt: isoTimestamp(), date: '2026-10-17',
+      })),
+      seen: {},
+    }, null, 2), 'utf8')
+    for (const batchId of ids) {
+      await writeFile(join(ws, `inbox/.candidates-${batchId}.json`), JSON.stringify({
+        version: 1, batchId, candidates: [],
+      }, null, 2), 'utf8')
+    }
+    const { flows } = harness({ workspace: ws, noMessages: true })
+    const result = await flows.upgrade({ sessionId: 'session-test' })
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'NO_CANDIDATES')
+    // 必须点名是哪几个批次：这样用户知道要去重建/重提炼哪一批。
+    assert.match(result.message, /001、002/u)
+    assert.match(result.message, /收集提炼/u)
+    assert.deepEqual(result.batches, ['001', '002'])
   })
 
   it('未确认时只出变更清单，不写任何节点', async () => {

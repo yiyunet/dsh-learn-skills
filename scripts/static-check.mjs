@@ -7,7 +7,9 @@
  *   ② 每个相对 import 的**具名符号**在目标模块里真的有 `export`；
  *   ③ 每个 `.mjs` 文件语法能通过 `new Function`/动态 import 的语法检查；
  *   ④ 没有"引用了但没定义"的顶层标识符（按 export/import/声明/全局白名单核对）；
- *   ⑤ 客户端实现不得 import 非白名单的裸模块。
+ *   ⑤ 客户端实现不得 import 非白名单的裸模块；
+ *   ⑥ 宿主半侧不得 import 生态包（除宿主运行时提供的 @deepseek-ai/*）；
+ *   ⑦ **预设生成物里不得出现白名单外的提示词变量**（`{{x}}`）—— 见本文件 ⑦ 段的事故说明。
  *
  * ⚠️ 它**不能替代** `npm test`：静态检查证明不了行为。文件里明写这一点，
  * 免得有人拿"static-check 通过"当成"测试通过"。
@@ -211,9 +213,17 @@ for (const [file, source] of sources) {
   // catch (error)
   for (const match of source.matchAll(/catch\s*\(\s*([A-Za-z_$][\w$]*)/gmu)) defined.add(match[1])
 
-  // 只查"形如函数调用"的顶层名字
+  // 只查"形如函数调用"的顶层名字。
+  //
+  // ⚠️ 扫的是 `blankOut(source)`（注释与字符串内容已抹掉），**不是裸 source**。
+  //    这条曾经直接扫源码，于是出现了两次同型假阳性：
+  //      ① 本仓注释里大量引用代码片段当反例 —— 那些字样被当成真调用；
+  //      ② 一个时间正则里的 `T` 紧跟左圆括号，被报成"引用了未定义的符号 T"
+  //         （正则字面量不在 blankOut 的抹除范围内，但至少注释与字符串不再进扫描面）。
+  //    与 ④′ 用的是同一条判据（那里早就改成 CODE 了）—— 两处口径必须一致。
+  //    方向是**只减不加**：字符串/注释里的字样本来就不是调用。
   const called = new Set()
-  for (const match of source.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/gu)) called.add(match[1])
+  for (const match of blankOut(source).matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/gu)) called.add(match[1])
   const real = [...called].filter(name => !defined.has(name))
   // 只报大驼峰（更可能是真实符号，而不是方法名/局部变量），压低误报
   const suspicious = real.filter(name => /^[A-Z]/u.test(name))
@@ -400,9 +410,75 @@ for (const [file, source] of sources) {
   }
 }
 
+// ⑦ 预设生成物不得含未注册的提示词变量 —— **这条闸是为一次真实事故加的**。
+//
+// 事故（两台真机都踩过）：DSH 0.2.1-alpha.1 起 loop 只注册 `provider` / `model`
+// 两个内置提示词变量，**未注册变量在插值时直接抛错**（严格插值）；工作目录不再是
+// 提示词变量，改由 working-directory 服务作为**运行时上下文**注入。而本插件的
+// 预设生成器当时把 `{{cwd}}` 写死在 `persona.suffix` 里 ⇒ 每新建一个预设就重新
+// 种一次故障：选中任何由本插件生成的预设，模型请求前即失败，
+// `unknown prompt variable "{{cwd}}" in section "deployment:persona-suffix"`。
+//
+// 为什么判据落在**渲染输出**上，而不是扫源码字符串：真正被宿主插值的是产物；
+// 源码里的字样可能只是注释、反例或检查器自己的报错文案。输出里没有，才是那条线。
+//
+// ⚠️ 这一条仍然只是静态体检的一条规则（`failures.push` 记账、最后统一 exit），
+//    不替代 `npm test`：`test/preset-vars.test.mjs` 另有一条"把该行加回去，闸必须红"
+//    的反向用例 —— 闸自己也要被验证过，否则它可能一直是红的或一直是绿的。
+const ALLOWED_PROMPT_VARIABLES = ['provider', 'model']
+{
+  const presetModule = await import(new URL('../plugin-src/host/preset.mjs', import.meta.url).href)
+  // 样例答案刻意**填满**：空槽位会走 `（未填写）` 分支，覆盖不到真实产物的形态。
+  const sampleAnswers = {
+    values: {
+      name: '静态体检样例',
+      vocation: '技术文档写作者',
+      audience: '刚接手知识库的同事',
+      expectation: '三个月内能独立维护一套索引',
+      interests: ['知识管理', '写作'],
+      goal: '把散落的笔记变成可检索的节点',
+      baseline: '会写但不成体系',
+      style: '先给结论再给依据',
+      priority: '把索引补齐',
+      trust: '能给出处才算成立',
+      judge: '先保稳定再谈速度',
+    },
+    unknown: {},
+  }
+  const renders = [
+    { label: 'renderAgentComposition()', text: presetModule.renderAgentComposition(sampleAnswers) },
+    {
+      label: 'renderPresetPatch()',
+      text: presetModule.renderPresetPatch({
+        presetId: 'learn-staticcheck',
+        displayName: '静态体检样例',
+        answers: sampleAnswers,
+      }),
+    },
+  ]
+  const allowed = new RegExp(`\\{\\{(?:${ALLOWED_PROMPT_VARIABLES.join('|')})\\}\\}`, 'gu')
+  let checkedLines = 0
+  for (const render of renders) {
+    String(render.text).split('\n').forEach((line, index) => {
+      checkedLines += 1
+      // 先剥掉白名单变量，再问"还剩不剩花括号" —— 比只按命名正则扫更严：
+      // `{{Foo}}`、`{{ }}`、落单的 `}}` 都由同一条判据接住。
+      if (!/\{\{|\}\}/u.test(line.replace(allowed, ''))) return
+      const named = [...line.matchAll(/\{\{([a-z][a-z0-9_]*)\}\}/gu)].map(match => match[1])
+      const why = named.length === 0
+        ? '出现了无法识别的花括号写法'
+        : `出现了未注册的提示词变量 {{${named[0]}}}（白名单：${ALLOWED_PROMPT_VARIABLES.join(' / ')}）`
+      failures.push(`plugin-src/host/preset.mjs 的 ${render.label} 输出第 ${index + 1} 行${why}：`
+        + `\`${line.trim()}\` —— 宿主会把它当提示词变量插值，未注册变量直接抛错`
+        + '（DSH 0.2.1-alpha.1 起只注册 provider / model；工作目录改由运行时上下文注入）')
+    })
+  }
+  notes.push(`提示词变量白名单检查：${renders.length} 份渲染产物 / ${checkedLines} 行`)
+}
+
 console.log(`静态一致性体检：${notes.join('；')}`)
 if (failures.length === 0) {
-  console.log('✓ 通过（相对 import 齐全、具名符号存在、语法可解析、客户端模块白名单、宿主依赖面）')
+  console.log('✓ 通过（相对 import 齐全、具名符号存在、语法可解析、客户端模块白名单、宿主依赖面、提示词变量白名单）')
   console.log('⚠️ 这只证明静态一致性，**不证明行为** —— 必须另外跑 npm test / npm run verify。')
   process.exit(0)
 }

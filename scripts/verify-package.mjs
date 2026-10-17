@@ -101,6 +101,7 @@ const REQUIRED = [
   'plugin-src/host/audit.mjs',
   'plugin-src/host/redact.mjs',
   'plugin-src/host/preset.mjs',
+  'plugin-src/host/ui-text.mjs',
   'plugin-src/host/rpc.mjs',
   'scripts/build.mjs',
   'scripts/markers.mjs',
@@ -129,6 +130,9 @@ const REQUIRED = [
   'test/rpc.test.mjs',
   'test/envelope.test.mjs',
   'test/clean-test-state.test.mjs',
+  'test/preset-vars.test.mjs',
+  'test/ui-text.test.mjs',
+  'test/session-read.test.mjs',
   'test/fixtures.mjs',
 ]
 for (const relativePath of REQUIRED) {
@@ -159,6 +163,19 @@ const manifest = await readJson('package.json')
         + `（${String(manifest?.version)}）不一致 —— 同上，\`npm ci\` 会失败`)
     }
   }
+}
+
+// ── ②-c 版本号一致（manifest ↔ 宿主源码里的 VERSION 字面量）──────────────
+// 为什么单钉一条：`status` 与体检报告都回显这个字面量，而它是**源码里写死的**。
+// 实测 2.2.2 发布时它停在 2.2.0 —— 用户看到的版本比真实版本旧两个补丁号，
+// 排查"装的到底是哪一版"时直接把人带偏，而本地四项门禁全绿（没人读它）。
+{
+  const source = await readIfExists('plugin-src/host/index.mjs') ?? ''
+  const version = /const VERSION = '([^']+)'/u.exec(source)?.[1]
+  check(version !== undefined, 'plugin-src/host/index.mjs 里找不到 `const VERSION = \'…\'` —— status 与报告将无法回显版本')
+  check(version === manifest?.version,
+    `宿主的 VERSION（${String(version)}）与 package.json（${String(manifest?.version)}）不一致 —— `
+    + '`status` 会报一个不存在的版本号，排障时会被它带偏')
 }
 
 // ── ② 依赖节不得出现宿主运行时包 ──────────────────────────────────────────

@@ -18,6 +18,7 @@
 
 import { createFlows, ENTRIES } from './flows.mjs'
 import { registerLearnRpc, RPC_ENDPOINT } from './rpc.mjs'
+import { plainText } from './ui-text.mjs'
 
 export const name = 'learn-skills'
 
@@ -34,8 +35,8 @@ export const name = 'learn-skills'
  */
 export const inject = ['userQuestions', 'commands']
 
-/** 插件版本（status 回显与报告用；构建时与 package.json 一致）。 */
-const VERSION = '2.2.0'
+/** 插件版本（status 回显与报告用；与 package.json 一致，由 `verify-package.mjs` 断言）。 */
+const VERSION = '2.2.8'
 
 /** 命令名（斜杠后的名字）。 */
 const COMMAND = 'learn'
@@ -100,6 +101,8 @@ export function apply(ctx, config = {}) {
         presetId: null,
         messages: [],
         historyComplete: false,
+        // 读统计：连会话都没找到时也必须给出**同形状**的字段（处处按它判"读到了吗"）。
+        readStats: { eventsRead: 0, eventTypes: [], eventsSource: 'none', messagesBuilt: 0, textChars: 0, excludedBySource: [] },
         reason: '找不到该会话的 live agent（可能已结束或不是当前会话）',
       }
     }
@@ -113,9 +116,15 @@ export function apply(ctx, config = {}) {
       }
     }
 
-    const events = typeof session?.events === 'function'
-      ? [...session.events()]
-      : Array.isArray(session?.events) ? [...session.events] : []
+    // ★ 读事件：**0.2.1-rc.1 的 `Session` 没有 `events()`**。
+    //   官方 API 只有 `snapshotEvents(fromSeq,toSeqExclusive)` / `ownEvents()` /
+    //   `deriveMessages()` / `deriveEventMessage()`（依据：`packages/core/session/src/index.ts`
+    //   的 725 / 742 / 984 / 1013 行，逐条对得上 api-catalog 里的 `class Session` 声明）。
+    //   此前这里只查 `session.events`，于是**永远拿到空数组** ⇒ messages 恒空 ⇒
+    //   候选恒 0 —— 而界面把这一路结果说成「完整历史」。这就是「收集提炼」只有空表的根因。
+    //   现在按"新名 → 老名 → 裸数组"三步取，并把命中哪一步记进 readStats，
+    //   下次真机一看 `eventsSource` 就知道走的是哪条路。
+    const { events, eventsSource } = readSessionEvents(session)
     const presetId = session?.header?.agentPreset
       ?? (typeof ctx.get('agents')?.presetForSession === 'function'
         ? ctx.get('agents').presetForSession(session) : null)
@@ -126,8 +135,22 @@ export function apply(ctx, config = {}) {
       && typeof event.surfaceOp === 'object' && event.surfaceOp?.op === 'replace')
 
     const messages = []
+    // ★ 只把**真人输入**当消息（2026-10 真机：58 条候选里大半是注入噪声）。
+    //
+    //   宿主把运行时上下文、技能目录、AGENTS.md 指令、时间上下文、goal 轮次等
+    //   **统统写成 `user/message`**，只在 `data.source.kind` 上区分。`events()` 修好之后
+    //   我们第一次真正读到它们，于是「Current runtime context…」「<system-reminder>…」
+    //   「Additional instructions from AGENTS.md」全成了候选。
+    //   第一性原理：**知识只能来自人说的话**，机器注入的内容不是知识。
+    //   白名单只有 `'user'`；其余按 kind 计数进 readStats —— **看得见地排除**，不静默丢。
+    const excludedBySource = new Map()
     for (const event of events) {
       if (event?.type === 'user/message') {
+        const kind = sourceKindOf(event.data)
+        if (kind !== 'user') {
+          excludedBySource.set(kind, (excludedBySource.get(kind) ?? 0) + 1)
+          continue
+        }
         const text = textOf(event.data)
         if (text === '') continue
         messages.push({
@@ -135,10 +158,13 @@ export function apply(ctx, config = {}) {
           seq: Number(event.seq ?? 0),
           role: 'user',
           text,
-          source: event.data?.source ?? 'unknown',
+          // `source` 是**对象**（`{ kind, … }`），不是字符串 —— 宿主侧判据是
+          // `event.data.source.kind === 'user'`（依据 `packages/goal/tool-goal/src/authority.ts:83`）。
+          // 早期这里按字符串比较，于是"排除本插件自己的提问"从未生效。
+          source: kind,
           sessionId,
           // 本插件自己的提问也走 agent.inject，标记出来供 fixRange 排除。
-          origin: event.data?.source === 'agent.inject' && /learn-skills|AI学习/u.test(text) ? 'learn-skills' : undefined,
+          origin: kind === 'agent.inject' && /learn-skills|AI学习/u.test(text) ? 'learn-skills' : undefined,
         })
         continue
       }
@@ -156,6 +182,20 @@ export function apply(ctx, config = {}) {
       }
     }
 
+    // 事件类型分布（前 5）：只用于**报读**，不参与任何判定。
+    // 为什么需要它：只认 `user/message` / `assistant/message` 两种类型，若宿主改了
+    // 事件名，这里会一个都不匹配 —— 而"类型对不上"与"会话里真没消息"在界面上
+    // 长得一模一样。把实际类型打出来，下一次就能一眼分辨。
+    const typeCounts = new Map()
+    for (const event of events) {
+      const type = typeof event?.type === 'string' && event.type !== '' ? event.type : '(无 type)'
+      typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1)
+    }
+    const eventTypes = [...typeCounts.entries()]
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 5)
+      .map(([type, count]) => ({ type, count }))
+
     return {
       sessionId,
       workspace,
@@ -163,6 +203,25 @@ export function apply(ctx, config = {}) {
       messages,
       historyComplete: !compacted,
       compactionNote: compacted ? '该会话发生过上下文压缩，历史为部分范围' : null,
+      // ★ 读统计：**"读不到"必须是一个可见的数字**，不能表现成"没有值得记的内容"。
+      //   真机症状（两台机器都踩过）：提炼产出 0 条候选，界面却报「完整历史」，
+      //   根因就在这一层 —— 事件为 0 条、或事件类型与预期不符、或文本抽不出来，
+      //   三种情况的结果都是 `messages: []`，而下游无从区分。这三个数就是判据。
+      readStats: {
+        eventsRead: events.length,
+        // 走的是哪条读取路径：`snapshotEvents`（0.2.1-rc.1 的真身）/ `events` / `events-array` / `none`。
+        // 真机看到 `none` ⇒ 宿主又换了 API；看到 `events` ⇒ 跑在旧宿主上。这是定因用的读数。
+        eventsSource,
+        eventTypes,
+        messagesBuilt: messages.length,
+        textChars: messages.reduce((sum, message) => sum + message.text.length, 0),
+        // 被排除的注入来源（按 kind 计数）。`user/message` 不等于"人说的话" ——
+        // 宿主把 runtime-context / agent-instructions / goal / time-context 都写成它。
+        // 这份读数让"我排掉了多少机器噪声"也是可见的，而不是让候选数凭直觉变化。
+        excludedBySource: [...excludedBySource.entries()]
+          .sort((left, right) => right[1] - left[1])
+          .map(([kind, count]) => ({ kind, count })),
+      },
     }
   }
 
@@ -236,9 +295,56 @@ function renderForText(result) {
   if (typeof result === 'string') return result
   if (result.message !== undefined) {
     const extra = result.batchId === undefined ? '' : `\n批次：${result.batchId}`
-    return `${result.message}${extra}`
+    // 命令输出同样是纯文本：`**没有**` 会连着星号一起显示，与界面同一条判据。
+    return `${plainText(result.message)}${extra}`
   }
   return JSON.stringify(result, null, 2)
+}
+
+/**
+ * 取会话事件，按宿主实际 API 分三步回落。
+ *
+ * 为什么必须是三步：`Session` 的事件读取新版本叫 `snapshotEvents()`（0.2.1-rc.1 实测，
+ * 见 `packages/core/session/src/index.ts:725`；`ownEvents()` 只给本对象生命周期内产生的事件，
+ * 语义不同，**不能拿它顶替**），老宿主/部分封装则暴露 `events()` 或裸数组。
+ * 只认一种的后果是"读不到"，而"读不到"在界面上与"没有内容"长得一模一样 ——
+ * 这正是本插件"提炼恒 0 候选、却报完整历史"的病根。
+ *
+ * @param {object} session 会话对象（可能为 undefined）
+ * @returns {{events: object[], eventsSource: 'snapshotEvents'|'events'|'events-array'|'none'}}
+ */
+export function readSessionEvents(session) {
+  if (session === undefined || session === null) return { events: [], eventsSource: 'none' }
+  const snapshotEvents = session.snapshotEvents
+  if (typeof snapshotEvents === 'function') {
+    const taken = snapshotEvents.call(session)
+    // 无参调用即全量：`toSeqExclusive` 默认取 `this.seq`。
+    if (taken !== null && typeof taken === 'object' && typeof taken[Symbol.iterator] === 'function') {
+      return { events: [...taken], eventsSource: 'snapshotEvents' }
+    }
+  }
+  const events = session.events
+  if (typeof events === 'function') return { events: [...events.call(session)], eventsSource: 'events' }
+  if (Array.isArray(events)) return { events: [...events], eventsSource: 'events-array' }
+  return { events: [], eventsSource: 'none' }
+}
+
+/**
+ * 取消息来源标识（字符串）。
+ *
+ * 为什么单独成函数：宿主的 `user/message.data.source` 是**对象**（`{ kind, … }`），
+ * 判据是 `source.kind`（依据 `packages/goal/tool-goal/src/authority.ts:83`）；
+ * 本插件早期按字符串比较，`'agent.inject'` 永远不成立 ⇒ 自己的提问从未被排除，
+ * 会混进候选。这里同时容忍"已经是字符串"的老形状，并且**不允许**回落成 `[object Object]`。
+ *
+ * @param {object} data 事件 data
+ * @returns {string} 来源 kind，识别不出时 `'unknown'`
+ */
+export function sourceKindOf(data) {
+  const source = data?.source
+  if (typeof source === 'string') return source
+  if (typeof source?.kind === 'string') return source.kind
+  return 'unknown'
 }
 
 /**

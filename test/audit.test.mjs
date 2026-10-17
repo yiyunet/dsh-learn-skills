@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 
-import { audit, collect, compareWithBaseline, renderAuditReport, CONFIDENCE } from '../plugin-src/host/audit.mjs'
+import { audit, collect, compareWithBaseline, renderAuditReport, scanPresetBundles, CONFIDENCE } from '../plugin-src/host/audit.mjs'
 import { redact, REDACTION_NOTICE } from '../plugin-src/host/redact.mjs'
 import { fingerprint } from '../plugin-src/host/paths.mjs'
 // 夹具由片段拼装（见该模块头注释）：源码里不出现完整形态的假凭证，
@@ -347,5 +347,119 @@ describe('compareWithBaseline —— 按内容指纹，不按修改时间', () =
     assert.equal(second.delta.available, true)
     assert.ok(second.delta.summary.added >= 1)
     assert.ok(second.delta.entries.some(entry => /新增/u.test(entry.note)))
+  })
+})
+
+describe('预设 bundle 的提示词变量 —— 体检必须点名（两台真机的真实夹具）', () => {
+  // 夹具照抄真机形态（两台机器都踩过同一个坑）：
+  //   · `<工作区>/.dsh/preset-bundles/learn-1a2b3c/cordis.patch.yml` —— 本插件生成，1 处
+  //     `suffix: Your working directory is {{cwd}}.`；
+  //   · `<dshHome>/preset-bundles/example-presets/cordis.patch.yml` —— 手工迁移产物，
+  //     11 处 prefix 里的「工作目录 {{cwd}}，/。」
+  // 只删掉生成器那一行是**不够**的：已经生成的预设还躺在盘上，体检必须能指出来。
+  let ws
+  const BROKEN_ID = 'learn-1a2b3c'
+  const MIGRATED_ID = 'example-presets'
+
+  /** 一份"插件生成物"形态的 patch（就是 2.2.1 及更早版本写出来的样子）。 */
+  const pluginGenerated = () => [
+    '- insert:',
+    '    - id: preset-learn-1a2b3c',
+    "      name: '@deepseek-ai/dsh-agent-preset'",
+    '      config:',
+    '        id: learn-1a2b3c',
+    "        name: '我的学习预设'",
+    '        plugins:',
+    '          - id: persona',
+    "            name: '@deepseek-ai/dsh-persona'",
+    '            config:',
+    '              suffix: Your working directory is {{cwd}}.',
+    '              prefix: |-',
+    '                你是「我的学习预设」。',
+    '',
+  ].join('\n')
+
+  /** 一份"手工迁移物"形态的 patch：11 处 prefix 内嵌变量。 */
+  const migrated = () => [
+    '- insert:',
+    '    - id: preset-migrated-a',
+    "      name: '@deepseek-ai/dsh-agent-preset'",
+    '      config:',
+    '        plugins:',
+    '          - id: persona',
+    "            name: '@deepseek-ai/dsh-persona'",
+    '            config:',
+    '              prefix: |-',
+    ...Array.from({ length: 11 }, (_, index) => (
+      index % 2 === 0 ? `                工作目录 {{cwd}}，专属文件夹 P${index}/。` : '                工作目录 {{cwd}}。'
+    )),
+    '',
+  ].join('\n')
+
+  before(async () => {
+    ws = await mkdtemp(join(tmpdir(), 'learn-skills-presets-'))
+    const put = async (relative, content) => {
+      const target = join(ws, relative)
+      await mkdir(join(target, '..'), { recursive: true })
+      await writeFile(target, content, 'utf8')
+    }
+    await put('AGENTS.md', '# 规则\n\n## 职责边界\n- 只做学习\n')
+    await put('.dsh/preset-bundles/learn-1a2b3c/cordis.patch.yml', pluginGenerated())
+    await put('.dsh/preset-bundles/example-presets/cordis.patch.yml', migrated())
+    // 对照：一份**干净**的预设（2.2.2 之后的产物形态）。
+    await put('.dsh/preset-bundles/learn-clean00/cordis.patch.yml', [
+      '- insert:',
+      '    - id: preset-learn-clean00',
+      "      name: '@deepseek-ai/dsh-agent-preset'",
+      '      config:',
+      '        plugins:',
+      '          - id: persona',
+      "            name: '@deepseek-ai/dsh-persona'",
+      '            config:',
+      '              prefix: |-',
+      '                你是「干净预设」。',
+      "                !!js process.platform === 'win32'",
+      '                数学式子写 {x} 不算变量。',
+      '',
+    ].join('\n'))
+  })
+
+  after(async () => {
+    await rm(ws, { recursive: true, force: true })
+  })
+
+  it('scanPresetBundles 独立可用：报出文件路径、行号与命中行原文', async () => {
+    const result = await scanPresetBundles({
+      roots: [join(ws, '.dsh/preset-bundles')],
+      workspace: ws,
+    })
+    assert.equal(result.files.length, 3)
+    const broken = result.findings.filter(entry => entry.source.includes(BROKEN_ID))
+    assert.equal(broken.length, 1)
+    assert.match(broken[0].text, /\{\{cwd\}\}/u)
+    assert.ok(Number.isInteger(broken[0].line) && broken[0].line > 0)
+    const migratedHits = result.findings.filter(entry => entry.source.includes(MIGRATED_ID))
+    assert.equal(migratedHits.length, 11)
+    // 对照：干净预设零命中 —— 闸不是恒真。
+    assert.equal(result.findings.some(entry => entry.source.includes('learn-clean00')), false)
+  })
+
+  it('体检把它们并进 ⑯ 已知问题，并提一条 PRESET_PROMPT_VARIABLE 告警', async () => {
+    const collected = await collect({ workspace: ws, dirs: DIRS, maxFiles: 100, maxBytes: 100000 })
+    const result = audit({ collected, baseline: undefined, context: {} })
+
+    const issues = result.items.find(item => item.id === 'issues').entries
+    const promptVariables = issues.filter(entry => entry.kind === 'prompt-variable')
+    assert.equal(promptVariables.length, 12, `应报出 12 处，实得 ${promptVariables.length}`)
+    // 每条都必须指到**具体文件 + 行号**：修法是"重建"还是"手改"由人按代价决定。
+    assert.ok(promptVariables.every(entry => /\.dsh\/preset-bundles\/.+\/cordis\.patch\.yml 第 \d+ 行/u.test(entry.detail)),
+      `条目的 detail 必须带路径与行号：${JSON.stringify(promptVariables.map(entry => entry.detail))}`)
+
+    const warning = result.warnings.find(item => item.code === 'PRESET_PROMPT_VARIABLE')
+    assert.ok(warning !== undefined, `缺少 PRESET_PROMPT_VARIABLE 告警：${JSON.stringify(result.warnings)}`)
+    assert.match(warning.detail, /learn-1a2b3c/u)
+    assert.match(warning.detail, /example-presets/u)
+    // 干净预设不该被点名。
+    assert.equal(/learn-clean00/u.test(warning.detail), false)
   })
 })

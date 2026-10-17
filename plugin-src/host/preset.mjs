@@ -681,6 +681,66 @@ function styleCandidates() {
 }
 
 /**
+ * 用户自由文本里"提示词变量"的判据：**成对的双花括号**。
+ *
+ * 为什么必须拦（实测故障，两台真机都踩过）：DSH 0.2.1-alpha.1 起 loop 只注册
+ * `provider` / `model` 两个内置提示词变量，未注册变量在插值时**直接抛错**（严格插值）。
+ * 用户在人设正文里写一个 `{{公司}}`，生成的预设就会在选中它时于模型请求前失败：
+ * `unknown prompt variable "{{公司}}"`。这与生成器自己写死 `{{cwd}}` 是同一类故障，
+ * 只是一个来自代码、一个来自输入 —— 所以闸要设在**入参**处，而不是只删掉那一行。
+ *
+ * 判据刻意只认成对双花括号：YAML 的 `!!js process.platform === 'win32'`、
+ * 数学/代码里的单个 `{x}` 都不命中 —— 误伤比漏拦更坏，一次误伤就会让人绕过这道闸。
+ */
+const PROMPT_VARIABLE = /\{\{|\}\}/u
+
+/** 变量名 → 中文标签（只用于报错文案；未登记的槽位直接用英文名）。 */
+const PROMPT_VARIABLE_LABELS = Object.freeze({
+  name: '名字',
+  vocation: '职业/身份',
+  audience: '面向什么',
+  expectation: '期望达到什么',
+  interests: '关注方向',
+  goal: '学习目标',
+  baseline: '当前基础与困难',
+  style: '学习方式与约束',
+  priority: '最想先解决的一件事',
+  trust: '可信判据',
+  judge: '取舍口径',
+})
+
+/**
+ * 命中提示词变量时的统一文案 —— 要求"能直接指导用户怎么改"。
+ * @param {string} topic 槽位名
+ * @param {string} value 命中的值
+ * @returns {string} 面向用户的说明
+ */
+function promptVariableMessage(topic, value) {
+  const label = PROMPT_VARIABLE_LABELS[topic] ?? TOPIC_LABELS[topic] ?? topic
+  return `「${label}」里不能包含 {{ }}：\`${String(value).slice(0, 40)}\` 中的花括号会被当作`
+    + '提示词变量插值，而 DSH 0.2.1+ 遇到未注册变量会**直接报错**（该预设一选中就失败）。'
+    + '请删掉花括号或改成普通文字，例如写「工作目录见运行时上下文」而不是一个变量占位符。'
+}
+
+/**
+ * 在归一化答案里找出第一个含提示词变量的字段。
+ *
+ * 生成侧（`createPreset`）与校验侧（`validateAnswers`）共用同一判据 ——
+ * 不允许"问答环拦一套、直接调用放一套"。
+ * @param {object} answers 归一化答案（`{ values, unknown }`）
+ * @returns {{ topic: string, value: string } | null} 命中项；干净时为 null
+ */
+export function findPromptVariable(answers) {
+  for (const [topic, raw] of Object.entries(answers?.values ?? {})) {
+    for (const item of asList(raw)) {
+      const text = String(item ?? '')
+      if (PROMPT_VARIABLE.test(text)) return { topic, value: text }
+    }
+  }
+  return null
+}
+
+/**
  * 校验一遍答案。名字必须有效；其余允许未知。
  * @param {Record<string, unknown>} answers 原始答案
  * @param {{ usedNames?: Iterable<string> }} [options] 选项
@@ -692,12 +752,31 @@ export function validateAnswers(answers, options = {}) {
 
   const nameResult = validatePresetName(answers?.name, { used: options.usedNames ?? [] })
   if (nameResult.ok) {
-    normalized.values.name = nameResult.name
+    // 名字会进人设首句（`你是「<名字>」…`）⇒ 与正文同一道闸。
+    if (PROMPT_VARIABLE.test(nameResult.name)) {
+      errors.push({ topic: 'name', code: 'PROMPT_VARIABLE', message: promptVariableMessage('name', nameResult.name) })
+      normalized.unknown.name = true
+    } else {
+      normalized.values.name = nameResult.name
+    }
   } else {
     errors.push({ topic: 'name', code: nameResult.code, message: nameResult.message })
   }
 
   const skipLabels = new Set([SKIP_OPTION.label, '暂不透露'])
+  /**
+   * 命中提示词变量 ⇒ 记错并**保持未知**（`null` + `unknown`）。
+   *
+   * 为什么不"顺手把花括号删掉"再继续：静默改写用户的原话，比明确报错更坏 ——
+   * 用户会以为他写的东西被完整采纳了。宁可不落库，也不替他改字。
+   */
+  const rejectIfPromptVariable = (topic, value) => {
+    if (!PROMPT_VARIABLE.test(value)) return false
+    errors.push({ topic, code: 'PROMPT_VARIABLE', message: promptVariableMessage(topic, value) })
+    normalized.unknown[topic] = true
+    normalized.values[topic] = null
+    return true
+  }
   const single = (topic, value) => {
     // ★ 2026-09-28：第 4/5/6/7 题改为**多选**后，这里会收到数组。
     //   处理方式＝过滤空值与跳过标记后用「、」连接 —— 下游（预设正文、预览、
@@ -712,6 +791,7 @@ export function validateAnswers(answers, options = {}) {
         normalized.values[topic] = null
         return
       }
+      if (rejectIfPromptVariable(topic, items.join('、'))) return
       normalized.values[topic] = [...new Set(items)].join('、')
       return
     }
@@ -721,6 +801,7 @@ export function validateAnswers(answers, options = {}) {
       normalized.values[topic] = null
       return
     }
+    if (rejectIfPromptVariable(topic, raw)) return
     normalized.values[topic] = raw
   }
   single('vocation', answers?.vocation)
@@ -745,7 +826,13 @@ export function validateAnswers(answers, options = {}) {
       .map(item => String(item).trim())
       .filter(item => item !== '' && item !== SKIP_OPTION.label && item !== '其他，请输入'),
   )]
-  if (interests.length === 0) {
+  // 关注方向是**多选自由文本**，同样会被拼进人设正文 ⇒ 同一道闸（命中即整项保持未知，
+  // 而不是只丢掉命中的那一条：被拦下的内容如果不明说，"少了一个关注方向"没人能发现）。
+  const badInterest = interests.find(item => PROMPT_VARIABLE.test(item))
+  if (badInterest !== undefined) {
+    errors.push({ topic: 'interests', code: 'PROMPT_VARIABLE', message: promptVariableMessage('interests', badInterest) })
+  }
+  if (interests.length === 0 || badInterest !== undefined) {
     normalized.unknown.interests = true
     normalized.values.interests = null
   } else {
@@ -1216,6 +1303,19 @@ export async function createPreset(options) {
   }
 
   const decisions = []
+  // ★ 生成前兜底闸：`createPreset` 是导出函数（RPC、测试、将来的入口都会直接调它），
+  //   问答环里那道 `validateAnswers` 挡不住绕过问答环的调用方。命中即整单拒绝 ——
+  //   绝不"顺手把花括号删掉"再写盘：静默改写用户的话比报错更坏。
+  const offending = findPromptVariable(answers)
+  if (offending !== null) {
+    return {
+      ok: false,
+      code: 'PROMPT_VARIABLE',
+      message: promptVariableMessage(offending.topic, offending.value),
+      directory,
+      decisions,
+    }
+  }
   const files = [
     {
       relative: 'package.json',
@@ -1268,7 +1368,20 @@ export function renderAgentComposition(answers) {
     '- id: persona',
     "  name: '@deepseek-ai/dsh-persona'",
     '  config:',
-    '    suffix: Your working directory is {{cwd}}.',
+    // ★ 这里刻意**没有** `suffix`（persona 的 suffix 默认空，空文本渲染时整段丢弃）。
+    //
+    //   曾经写的是 `suffix: Your working directory is {{cwd}}.`，那一行是一个真实故障：
+    //   DSH 0.2.1-alpha.1 起 loop 只注册 `provider` / `model` 两个内置提示词变量，
+    //   **未注册变量在插值时直接抛错**（严格插值）；工作目录不再是提示词变量，
+    //   改由 working-directory 服务作为**运行时上下文**注入（每次请求自带
+    //   `Current working directory: "..."`）。于是由本插件生成的每个预设，
+    //   一被选中就在模型请求前失败：`unknown prompt variable "{{cwd}}"`。
+    //   依据：`docs/upgrade-guide/v0.2.1-alpha.1/working-directory/guide.md`、
+    //   `packages/core/system-prompt/README.md`（"Custom persona templates must not
+    //   depend on a built-in {{cwd}} variable"）。
+    //
+    //   ⚠️ 不要改用 `{{provider}}` / `{{model}}` 来"补一句"：那会把模型名种进人设前缀，
+    //   同一个人设换模型即 prefix 缓存全废。真要一句话，只能写**无变量**的固定文本。
     '    prefix: |-',
     indent(persona),
     '',

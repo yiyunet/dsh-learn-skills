@@ -134,10 +134,19 @@ export function fixRange(messages, options = {}) {
     limitations.push(`消息数超过上限 ${limit}，只取了最近 ${limit} 条（更早的部分未参与本次提炼）`)
   }
 
-  const complete = all.length === eligible.length
+  const complete = all.length > 0
+    && all.length === eligible.length
     && excludedByFlow.length === 0
     && covered <= limit
     && options.historyComplete !== false
+  // ★ 一条消息都没有 ≠ 「完整历史、只是没东西」。这一条是**实测故障**：
+  //   宿主侧读不到事件时 `all.length === 0`，旧判据给出 complete=true 且不留任何限制，
+  //   于是界面打出「范围 ?–?｜完整历史」，用户以为"没什么值得记的"，实则"根本没读到"。
+  //   "读不到"必须是一个说得出口的限制，而不是一个漂亮的结论。
+  if (all.length === 0) {
+    limitations.push('本次范围内没有读到任何会话消息（宿主事件为 0 条，或事件类型/结构与预期不符）'
+      + ' —— 本批为空是**读不到**，不是"没有值得记的内容"')
+  }
   if (options.historyComplete === false) {
     limitations.push('宿主未提供完整历史（上下文压缩后只有当前窗口），本次为部分范围')
   }
@@ -155,10 +164,136 @@ export function fixRange(messages, options = {}) {
 }
 
 /**
+ * 每会话候选上限（第一性原理：**上限不是省事，是逼出取舍**）。
+ *
+ * 为什么是 5：一次提炼里"真正会改变 Agent 下次行为"的东西本来就不多；超过 5 条，
+ * 审核那一步必然退化成"批量同意"，准入判据当场失效。宁可选 5 条最该改的，
+ * 也不要让 60 条把判断淹没。
+ */
+export const CANDIDATE_LIMIT = 5
+
+/** 收集阶段的安全上限（防止超长会话把内存与耗时拖垮；与"名额"是两件事）。 */
+const COLLECT_CAP = 500
+
+/** 类型价值：按"对后续行为的直接影响"排序，而不是按文本像不像知识。 */
+const TYPE_VALUE = {
+  correction: 100,   // 纠正：直接改掉一个错误认知
+  preference: 90,    // 偏好：影响此后所有输出
+  procedure: 80,     // 流程：可复用步骤
+  experience: 60,    // 经验：可参考，但仍要自己判断
+  unclassified: 30,  // 没有标签
+  hypothesis: 20,    // 猜测：未验证，最后考虑
+}
+
+/** 规范性措辞：出现即意味着"这是一条要长期生效的要求"，而不是一次性陈述。 */
+const DIRECTIVE = /(以后|今后|下次|记住|必须|一律|统一|禁止|不要|别再|总是|始终|优先|never|always|must\s+always)/iu
+
+/** 可核证据：链接 / 条款号 / 版本号 / ISO 日期 —— 有据可查的优先。 */
+const EVIDENCE = /(https?:\/\/|§\s*\d+|第\s*\d+\s*条|\b\d+\.\d+\.\d+\b|\b\d{4}-\d{2}-\d{2}\b)/u
+
+/**
+ * 给一条候选打"值不值得占一个名额"的分。
+ *
+ * 全部维度可解释、可复现（无模型调用）；分数只用于排序，**不写进任何节点**。
+ * @param {object} candidate 候选
+ * @returns {number} 分数
+ */
+export function candidateScore(candidate) {
+  const text = `${candidate?.title ?? ''} ${candidate?.summary ?? ''}`
+  let score = TYPE_VALUE[candidate?.type] ?? 30
+  if (DIRECTIVE.test(text)) score += 25
+  if (EVIDENCE.test(text)) score += 15
+  const length = String(candidate?.summary ?? '').length
+  if (length < 10) score -= 20
+  else if (length >= 30 && length <= 200) score += 10
+  else if (length > 400) score -= 10
+  return score
+}
+
+/** 归一化：去掉空白与常见标点，只留"说了什么"。 */
+function normalizeStatement(text) {
+  return String(text ?? '').replace(/[\s，。；、！？,.!?;:："'“”‘’()（）[\]【】]/gu, '')
+}
+
+/**
+ * 判"是不是同一句话说两遍"。
+ *
+ * ⚠️ **只认两种**：归一化后完全相同，或一条是另一条的加长版（前缀关系）。
+ * 刻意**不做**"字面相似度"判定 —— 实测反例：「以后报价一律用人民币」与「……用美元」
+ * 只差两个字，相似度 0.9+，但语义相反；被自动判成重复就等于**静默丢掉一条相反的规则**，
+ * 那比保留一条冗余危险得多。加长版（后一句把前一句说得更全）才是真重复。
+ * @param {string} left 文本
+ * @param {string} right 文本
+ * @returns {boolean} 是否同一句
+ */
+function isSameStatement(left, right) {
+  const a = normalizeStatement(left)
+  const b = normalizeStatement(right)
+  if (a === '' || b === '') return false
+  return a === b || a.startsWith(b) || b.startsWith(a)
+}
+
+/**
+ * 从候选里挑出最该占名额的 N 条。
+ *
+ * 三条规则（按优先级）：
+ * 1. **分数优先**（类型价值＋规范性措辞＋可核证据＋信息密度）；
+ * 2. **同形态降权**：同一类型每被选一次，后续同类型候选 −15 分（**软性**，不硬禁）——
+ *    目的是别让 5 个名额被"经验"占满、一条"以后必须…"都进不来；但真值钱的照样能进；
+ * 3. **同一句话只说一次**（见 {@link isSameStatement}）。
+ *
+ * 小规模**不裁剪**：`candidates.length <= limit` 时原样返回 ——
+ * 上限是"超额时的取舍规则"，不是"每轮都要砍一刀"。
+ * @param {object[]} candidates 候选
+ * @param {number} [limit] 名额
+ * @returns {{ selected: object[], dropped: object[], reasons: Record<string, number> }} 取舍结果
+ */
+export function selectTopCandidates(candidates, limit = CANDIDATE_LIMIT) {
+  const all = Array.isArray(candidates) ? candidates : []
+  if (all.length <= limit) return { selected: all, dropped: [], reasons: {} }
+  const remaining = all
+    .map((candidate, index) => ({ candidate, index, score: candidateScore(candidate) }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+  const selected = []
+  const perType = new Map()
+  let similar = 0
+  const TYPE_PENALTY = 15
+  while (selected.length < limit && remaining.length > 0) {
+    let bestIndex = 0
+    let bestValue = Number.NEGATIVE_INFINITY
+    for (let index = 0; index < remaining.length; index += 1) {
+      const type = String(remaining[index].candidate?.type ?? 'unclassified')
+      const value = remaining[index].score - TYPE_PENALTY * (perType.get(type) ?? 0)
+      if (value > bestValue) {
+        bestValue = value
+        bestIndex = index
+      }
+    }
+    const [entry] = remaining.splice(bestIndex, 1)
+    const type = String(entry.candidate?.type ?? 'unclassified')
+    if (selected.some(item => isSameStatement(item.summary, entry.candidate.summary))) {
+      similar += 1
+      continue
+    }
+    selected.push(entry.candidate)
+    perType.set(type, (perType.get(type) ?? 0) + 1)
+  }
+  const reasons = {}
+  if (similar > 0) reasons.similar = similar
+  if (remaining.length > 0) reasons.overLimit = remaining.length
+  const picked = new Set(selected)
+  return { selected, dropped: all.filter(candidate => !picked.has(candidate)), reasons }
+}
+
+/**
  * 把一段消息转成结构化候选知识（不做语义发明，只做结构归纳）。
  *
  * 一条 user 消息 + 紧随其后的 assistant 消息合成一个候选；
  * 单独的 user 消息（例如用户给的事实、偏好、纠错）也各成一个候选。
+ *
+ * ⚠️ 名额限制**不在这里截断**：先全部收集（安全上限 {@link COLLECT_CAP}），
+ * 再交给 {@link selectTopCandidates} 按价值取舍。早期是"凑够 N 条就 break"，
+ * 那等于永远只取**最早**的 N 条 —— 与"最有用"无关。
  *
  * @param {object[]} messages 已固定的消息范围
  * @param {{ batchId: string, existing?: Record<string, string>, maxCandidates?: number, candidateId: (batchId: string, index: number) => string }} options 选项
@@ -167,14 +302,23 @@ export function fixRange(messages, options = {}) {
 export function extractCandidates(messages, options) {
   const items = Array.isArray(messages) ? messages : []
   const existing = options.existing ?? {}
-  const maxCandidates = options.maxCandidates ?? 60
+  const maxCandidates = options.maxCandidates ?? CANDIDATE_LIMIT
   const candidates = []
   let noiseCount = 0
+  // ★ 被跳过的样例（最多 3 条）：回答"收集到了什么、为什么没变成候选"。
+  //   只留 60 字预览 —— 这里不是存档，是让人**看见**过滤发生过（否则 0 候选时
+  //   界面上只剩一张空表，用户无从判断是没读到还是全被过滤了）。
+  const skippedSamples = []
+  const noteSkip = (reason, text) => {
+    if (skippedSamples.length >= 3) return
+    skippedSamples.push({ reason, text: text.length > 60 ? `${text.slice(0, 60)}…` : text })
+  }
 
   for (const message of items) {
     const text = String(message?.text ?? '').trim()
     if (isNoise(text)) {
       noiseCount += 1
+      noteSkip('噪声（寒暄/过短/无信息量）', text)
       continue
     }
     const digest = fingerprint(text)
@@ -182,6 +326,7 @@ export function extractCandidates(messages, options) {
     const type = classify(text)
     if (type === 'noise') {
       noiseCount += 1
+      noteSkip('判定为噪声', text)
       continue
     }
     candidates.push({
@@ -210,16 +355,26 @@ export function extractCandidates(messages, options) {
       fingerprint: digest,
       alreadyProcessed: seenBatch === undefined ? null : { batchId: seenBatch },
     })
-    if (candidates.length >= maxCandidates) break
+    if (candidates.length >= COLLECT_CAP) break
   }
 
+  // 超额 ⇒ 按价值取舍（见 `selectTopCandidates`）。取舍结果**必须可见**：
+  // 掉了多少条、因为什么掉的都进 stats —— 与"看得见地排除"是同一条纪律。
+  const selection = selectTopCandidates(candidates, maxCandidates)
   return {
-    candidates,
+    candidates: selection.selected,
     stats: {
       considered: items.length,
-      extracted: candidates.length,
+      extracted: selection.selected.length,
+      collected: candidates.length,
       noise: noiseCount,
-      alreadyProcessed: candidates.filter(item => item.alreadyProcessed !== null).length,
+      alreadyProcessed: selection.selected.filter(item => item.alreadyProcessed !== null).length,
+      capped: {
+        limit: maxCandidates,
+        dropped: selection.dropped.length,
+        reasons: selection.reasons,
+      },
+      skippedSamples,
     },
   }
 }

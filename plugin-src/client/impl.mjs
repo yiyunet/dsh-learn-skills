@@ -29,6 +29,9 @@
 import React from 'react'
 
 import { unwrapEnvelope } from './envelope.mjs'
+// 文案剥 Markdown 与宿主共用同一实现（纯函数，esbuild 打包时内联进来）。
+// 为什么不在客户端各写一份：界面文案与实际行为必须同源，两份手写必然漂移。
+import { plainText } from '../host/ui-text.mjs'
 
 /** RPC 端点名（不含 /api 前缀）。必须与宿主 rpc.mjs 的 RPC_ENDPOINT 一致。 */
 const RPC_ENDPOINT = 'dsh-learn-skills'
@@ -311,10 +314,10 @@ function LearnMenu(props) {
         if (result?.ok === false) {
           // 未绑定工作区 / 写门禁关闭 / 流程已在跑 —— 全部走可读的失败面板，不是静默。
           setView('failed')
-          setPayload(result)
+          setPayload(normalizePayload(result))
           return
         }
-        setPayload(result)
+        setPayload(normalizePayload(result))
         if (entry === 'init') setView(result.stage === 'created' ? 'created' : 'preview')
         else if (entry === 'upgrade') setView(result.stage === 'written' ? 'written' : 'review')
         else if (entry === 'audit') setView('report')
@@ -352,8 +355,8 @@ function LearnMenu(props) {
     setProgress('正在创建预设与工作区框架…')
     rpc('initConfirm', { sessionId })
       .then(result => {
-        if (result?.ok === false) { setView('failed'); setPayload(result); return }
-        setPayload(result)
+        if (result?.ok === false) { setView('failed'); setPayload(normalizePayload(result)); return }
+        setPayload(normalizePayload(result))
         setView('created')
       })
       .catch(cause => { setError(cause); setView('failed') })
@@ -364,8 +367,8 @@ function LearnMenu(props) {
     setProgress('正在写入已确认的变更…')
     rpc('upgradeConfirm', { sessionId, batchId: payload?.batches?.[0] })
       .then(result => {
-        if (result?.ok === false) { setView('failed'); setPayload(result); return }
-        setPayload(result)
+        if (result?.ok === false) { setView('failed'); setPayload(normalizePayload(result)); return }
+        setPayload(normalizePayload(result))
         setView('written')
       })
       .catch(cause => { setError(cause); setView('failed') })
@@ -384,7 +387,7 @@ function LearnMenu(props) {
     setPayload(current => ({ ...current, installing: true }))
     rpc('installPreset', { sessionId, presetId: payload?.preset?.presetId })
       .then(result => {
-        setPayload(current => ({ ...current, installing: false, installed: result }))
+        setPayload(current => ({ ...current, installing: false, installed: normalizePayload(result) }))
       })
       .catch(cause => {
         setPayload(current => ({
@@ -403,8 +406,8 @@ function LearnMenu(props) {
       report: payload?.report ?? '',
       baselineCandidate: payload?.baselineCandidate ?? {},
     }).then(result => {
-      if (result?.ok === false) { setView('failed'); setPayload(result); return }
-      setPayload({ ...payload, saved: result })
+      if (result?.ok === false) { setView('failed'); setPayload(normalizePayload(result)); return }
+      setPayload(normalizePayload({ ...payload, saved: result }))
       setView('report')
     }).catch(cause => { setError(cause); setView('failed') })
   }
@@ -486,6 +489,28 @@ function descriptionOf(id) {
     case 'audit': return '只读体检 + 变化对比 + 复用建议'
     default: return ''
   }
+}
+
+/**
+ * 把宿主返回的结果里**要显示**的文案统一剥掉 Markdown 星号。
+ *
+ * 为什么要过一道：面板是**纯文本**渲染，宿主文案里写 `本阶段**没有**修改…`
+ * 会连着星号一起显示（真机截图里就是这样）。在"进入状态"这一个点上剥，
+ * 比在九个渲染处各写一遍可靠 —— 而且新增渲染分支不会再漏。
+ * @param {unknown} result RPC 结果
+ * @returns {unknown} 规整后的结果
+ */
+function normalizePayload(result) {
+  if (result === null || typeof result !== 'object') return result
+  const next = { ...result }
+  if (typeof next.message === 'string') next.message = plainText(next.message)
+  if (typeof next.emptyReason === 'string') next.emptyReason = plainText(next.emptyReason)
+  if (next.saved !== null && typeof next.saved === 'object') next.saved = normalizePayload(next.saved)
+  if (next.installed !== null && typeof next.installed === 'object') next.installed = normalizePayload(next.installed)
+  if (next.preset !== null && typeof next.preset === 'object' && typeof next.preset.message === 'string') {
+    next.preset = { ...next.preset, message: plainText(next.preset.message) }
+  }
+  return next
 }
 
 /** 面板：所有状态（进行中 / 预览 / 变更清单 / 报告 / 结果 / 失败）复用同一个外壳。 */
@@ -589,7 +614,7 @@ function renderPreview(payload) {
   return h('div', null,
     h('div', null, ...renderMarkdown((preview.summary ?? []).map(line => `- ${line}`).join('\n'))),
     h('div', { style: { marginTop: 8, fontWeight: 600 } }, '预设定位'),
-    h('div', { style: S.small }, preview.positioning ?? ''),
+    h('div', { style: S.small }, plainText(preview.positioning ?? '')),
     h('div', { style: { marginTop: 8, fontWeight: 600 } }, '主题地图草案（AI 推导 · 确认后写入框架）'),
     topics.length === 0
       ? h('div', { style: S.small }, '本次没有生成主题地图（模型不可用或输出不合格式）—— '
@@ -599,9 +624,8 @@ function renderPreview(payload) {
         ...renderMarkdown(entry.items.map(item => `- ${item}`).join('\n')),
       ])),
     topics.length > 0
-      ? h('div', { style: S.small },
-        '这是**草案**：它是"往哪走 + 起手问题"，不是结论，也不是你的知识节点。'
-        + '不合意就先「返回修改」重来；节点仍由你自己的会话提炼。')
+      ? h('div', { style: S.small }, plainText('这是**草案**：它是"往哪走 + 起手问题"，不是结论，也不是你的知识节点。'
+        + '不合意就先「返回修改」重来；节点仍由你自己的会话提炼。'))
       : null,
     h('div', { style: { marginTop: 8, fontWeight: 600 } }, '知识框架草案'),
     ...renderMarkdown((preview.frameworkDraft ?? []).map(item => `- \`${item.path}\` —— ${item.title}：${item.note}`).join('\n')),
@@ -665,9 +689,8 @@ function renderCreated(payload) {
       ? h('div', { style: { marginTop: 8, fontWeight: 600 } }, '安装到宿主名册')
       : null,
     payload.preset?.ok === true
-      ? h('div', { style: S.small },
-        '只写盘**不算**预设存在：宿主的名册不扫描目录，只认 profile bundle 里的一行声明。'
-        + '点下面的「安装预设」把这一步做掉 —— 会自动算好 yaml 路径与 profile，你不需要知道预设 id。')
+      ? h('div', { style: S.small }, plainText('只写盘**不算**预设存在：宿主的名册不扫描目录，只认 profile bundle 里的一行声明。'
+        + '点下面的「安装预设」把这一步做掉 —— 会自动算好 yaml 路径与 profile，你不需要知道预设 id。'))
       : null,
     installed?.ok === true
       ? h('div', { style: S.hint },
@@ -684,7 +707,7 @@ function renderCreated(payload) {
           : null)
       : null,
 
-    h('div', { style: S.warn }, '预设在一个进程内按 standing scope 挂载一次，**不会**在当前会话即时生效 —— 安装后请重启并新建会话，再选择该预设。'),
+    h('div', { style: S.warn }, plainText('预设在一个进程内按 standing scope 挂载一次，**不会**在当前会话即时生效 —— 安装后请重启并新建会话，再选择该预设。')),
     h('div', { style: S.small }, '⚠️ 不要删也不要移动那个 bundle 目录：宿主重启时按预设 id 解析，定义缺失的会话会被拒绝恢复。'),
   )
 }
@@ -704,7 +727,7 @@ function renderReview(payload) {
         h('td', { style: S.td }, change.reason))))),
     payload.duplicateCount > 0 ? h('div', { style: S.hint }, `另有 ${payload.duplicateCount} 条与既有节点重复，已跳过（不写、不递增版本）。`) : null,
     payload.requiresBehaviorRuleApproval === true
-      ? h('div', { style: S.warn }, '清单含**行为规则**变更（预设提示词 / AGENTS.md / 技能）：按默认配置（allowBehaviorRules: false）不会执行，须显式放行后再来。')
+      ? h('div', { style: S.warn }, plainText('清单含**行为规则**变更（预设提示词 / AGENTS.md / 技能）：按默认配置（allowBehaviorRules: false）不会执行，须显式放行后再来。'))
       : null,
   )
 }
@@ -735,7 +758,7 @@ function renderWritten(payload) {
 function semanticNote(semantic) {
   if (semantic === undefined || semantic === null || semantic.enabled !== true) return null
   const divergences = (semantic.typeDivergence ?? 0) + (semantic.relationsDivergence ?? 0)
-  return '语义增强：已启用'
+  return plainText('语义增强：已启用')
     + `（${semantic.calls ?? 0} 次调用／${semantic.suggested ?? 0} 条建议）`
     + `${divergences > 0 ? `｜**两轨不一致 ${divergences} 处**，已在表中标出` : '｜与基线判定一致'}`
     + `${semantic.stopped === true ? '｜⚠️ 未跑完（达到预算或调用失败），部分候选无语义建议' : ''}`
@@ -770,37 +793,51 @@ function relationText(candidate) {
 }
 
 function renderDistill(payload) {
-  const candidates = payload.candidates ?? []
+  const candidates = Array.isArray(payload.candidates) ? payload.candidates : []
   const note = semanticNote(payload.semantic)
+  // 总览行由**宿主侧**算好（ui-text.mjs 的 distillOverview）—— 客户端只负责逐行显示。
+  // 这样"批次里到底有什么"只有一处实现，不会出现"界面上说的"与"实际发生的"不一致。
+  const overview = Array.isArray(payload.overview) && payload.overview.length > 0
+    ? payload.overview
+    : [`批次 ${payload.batchId ?? '—'}｜候选 ${candidates.length} 条`]
+  const skipped = Array.isArray(payload.skippedSamples) ? payload.skippedSamples : []
   return h('div', null,
-    h('div', { style: S.hint }, payload.message ?? ''),
-    h('div', { style: S.small },
-      `批次 ${payload.batchId}｜范围 ${payload.range?.from ?? '?'}–${payload.range?.to ?? '?'}｜`
-      + `${payload.complete === true ? '完整历史' : '部分上下文'}｜保留 ${payload.kept ?? 0} / 排除 ${payload.excluded ?? 0}`),
+    h('div', { style: S.hint }, plainText(payload.message ?? '')),
+    ...overview.map((line, index) => h('div', { key: `overview-${index}`, style: S.small }, line)),
     note !== null ? h('div', { style: S.small }, note) : null,
     (payload.limitations ?? []).length > 0
-      ? h('div', { style: S.warn }, `范围限制：${(payload.limitations ?? []).join('；')}`)
+      ? h('div', { style: S.warn }, `范围限制：${(payload.limitations ?? []).map(plainText).join('；')}`)
       : null,
-    h('table', { style: S.table },
-      h('thead', null, h('tr', null,
-        h('th', { style: S.th }, '候选'), h('th', { style: S.th }, '类型（基线／模型）'),
-        h('th', { style: S.th }, '决定'), h('th', { style: S.th }, '验证'),
-        h('th', { style: S.th }, '关联'), h('th', { style: S.th }, '依据／关系'))),
-      h('tbody', null, candidates.map((candidate, index) => {
-        const relation = relationText(candidate)
-        return h('tr', { key: index },
-          h('td', { style: S.td }, h('code', null, candidate.id), ' ', candidate.title),
-          h('td', { style: S.td }, typeCell(candidate)),
-          h('td', { style: S.td }, candidate.decision),
-          h('td', { style: S.td }, candidate.verification),
-          h('td', { style: S.td }, relation.pos),
-          h('td', { style: S.td }, relation.why ?? '—'))
-      }))),
+    // 0 条候选时给出**结论与原因**（空表格看起来像坏了，也没回答"为什么没有"）。
+    payload.emptyReason !== undefined && payload.emptyReason !== null
+      ? h('div', { style: S.warn }, payload.emptyReason)
+      : null,
+    skipped.length > 0
+      ? h('div', { style: S.small }, `被跳过的样例（${skipped.length} 条）：`
+        + skipped.map(item => `「${item.reason}」${item.text}`).join('；'))
+      : null,
+    candidates.length > 0
+      ? h('table', { style: S.table },
+        h('thead', null, h('tr', null,
+          h('th', { style: S.th }, '候选'), h('th', { style: S.th }, '类型（基线／模型）'),
+          h('th', { style: S.th }, '决定'), h('th', { style: S.th }, '验证'),
+          h('th', { style: S.th }, '关联'), h('th', { style: S.th }, '依据／关系'))),
+        h('tbody', null, candidates.map((candidate, index) => {
+          const relation = relationText(candidate)
+          return h('tr', { key: index },
+            h('td', { style: S.td }, h('code', null, candidate.id), ' ', candidate.title),
+            h('td', { style: S.td }, typeCell(candidate)),
+            h('td', { style: S.td }, candidate.decision),
+            h('td', { style: S.td }, candidate.verification),
+            h('td', { style: S.td }, relation.pos),
+            h('td', { style: S.td }, relation.why ?? '—'))
+        })))
+      : null,
     h('div', { style: S.small }, '「用户认可」与「已事实验证」是两个字段；点保留不会把一条内容变成已证实。'),
     note !== null
       ? h('div', { style: S.small },
-        '类型列与关联列：**基线轨**（关键词/词面算法，可复现）与**模型建议**（不可复现）'
-        + '不一致时会并排显示并标注「模型」——最终判定仍由你裁决。')
+        plainText('类型列与关联列：**基线轨**（关键词/词面算法，可复现）与**模型建议**（不可复现）'
+          + '不一致时会并排显示并标注「模型」——最终判定仍由你裁决。'))
       : null,
   )
 }

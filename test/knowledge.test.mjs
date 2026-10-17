@@ -8,9 +8,10 @@ import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 
 import {
-  CANDIDATE_TYPES, DECISION, VERIFICATION, classify, contentChanged, dedupeCandidates,
-  extractCandidates, findMissingNodes, fixRange, isNoise, loadNodes, mergeSemanticSuggestions,
-  parseFrameworkIndex, parseFrontmatter, relateToNodes, renderNode,
+  CANDIDATE_LIMIT, CANDIDATE_TYPES, DECISION, VERIFICATION, candidateScore, classify, contentChanged,
+  dedupeCandidates, extractCandidates, findMissingNodes, fixRange, isNoise, loadNodes,
+  mergeSemanticSuggestions, parseFrameworkIndex, parseFrontmatter, relateToNodes, renderNode,
+  selectTopCandidates,
 } from '../plugin-src/host/knowledge.mjs'
 import { readDirectory, readText } from '../plugin-src/host/fsx.mjs'
 import { candidateId, fingerprint } from '../plugin-src/host/paths.mjs'
@@ -134,6 +135,22 @@ describe('fixRange —— 固定消息范围，排除本流程自身产生的问
     assert.deepEqual(result.range, { from: 1, to: 2 })
     assert.deepEqual(result.limitations, [])
   })
+
+  it('★ 一条消息都没有 ⇒ 不许自称"完整历史"，且必须留下"没读到"的限制', () => {
+    // 真实的静默故障：宿主侧读不到事件时 `messages` 是空数组，旧判据仍给出
+    // complete=true、limitations=[]，于是界面打出「范围 ?–?｜完整历史」——
+    // 用户以为"没什么值得记的"，实际是"根本没读到"。这条钉的就是这个区别。
+    const result = fixRange([])
+    assert.equal(result.complete, false, '空范围不能自称完整 —— 那是在替宿主掩饰读失败')
+    assert.deepEqual(result.items, [])
+    assert.equal(result.limitations.length > 0, true, '必须留下限制说明，而不是一个漂亮的结论')
+    assert.match(result.limitations.join('；'), /没有读到任何会话消息/u)
+    assert.match(result.limitations.join('；'), /读不到/u)
+  })
+
+  it('对照组：给了一条消息就仍可判完整（上面那条不是把 complete 恒置假）', () => {
+    assert.equal(fixRange([message(1, 'a')]).complete, true)
+  })
 })
 
 describe('extractCandidates —— 结构归纳，不发明语义', () => {
@@ -148,6 +165,11 @@ describe('extractCandidates —— 结构归纳，不发明语义', () => {
     assert.equal(stats.noise, 1)
     assert.equal(candidates[0].id, 'C-001-01')
     assert.equal(candidates[1].id, 'C-001-02')
+    // ★ 被跳过的样例：0 候选时界面靠它回答"收集到了什么、为什么没提炼出来"。
+    assert.equal(Array.isArray(stats.skippedSamples), true)
+    assert.equal(stats.skippedSamples.length, 1)
+    assert.match(stats.skippedSamples[0].text, /好的/u)
+    assert.equal(stats.skippedSamples[0].reason.length > 0, true)
   })
 
   it('用户认可与事实验证是两个独立字段，默认都是未决', () => {
@@ -489,5 +511,116 @@ describe('contentChanged —— 内容实际变化才递增版本', () => {
 
   it('没有旧节点时视为变化', () => {
     assert.equal(contentChanged(undefined, base), true)
+  })
+})
+
+describe('每会话上限 5 条 —— 上限是逼出取舍，不是省事', () => {
+  /** 造一条候选（只保留取舍逻辑关心的字段）。 */
+  const candidate = (type, summary, extra = {}) => ({ id: summary.slice(0, 6), type, title: summary, summary, ...extra })
+
+  it('上限常量就是 5（改它必须走 CHANGELOG）', () => {
+    assert.equal(CANDIDATE_LIMIT, 5)
+  })
+
+  it('小规模不裁剪：不超额时原样返回，reasons 为空', () => {
+    // 上限是"超额时的取舍规则"，不是"每轮都砍一刀"。
+    const few = [candidate('preference', '以后报价一律用人民币'), candidate('procedure', '先查类目再填属性')]
+    const result = selectTopCandidates(few, 5)
+    assert.equal(result.selected.length, 2)
+    assert.deepEqual(result.reasons, {})
+  })
+
+  it('超额时优先留下"改行为"的那几条，先牺牲"猜测"', () => {
+    const many = [
+      candidate('hypothesis', '可能是缓存问题，之后再验证看看'),
+      candidate('hypothesis', '也许下周会变，不确定'),
+      candidate('experience', '上次这么干过，能跑通，实测有效'),
+      candidate('procedure', '步骤：先查类目，再填属性，最后提交'),
+      candidate('preference', '以后报表都用北京时间'),
+      candidate('correction', '更正：FCC 标识不是必须的，其实不是强制的'),
+    ]
+    const result = selectTopCandidates(many, 5)
+    assert.equal(result.selected.length, 5)
+    const kept = result.selected.map(item => item.type)
+    // 两条猜测分最低 ⇒ 必有一条被挤掉
+    assert.ok(kept.filter(type => type === 'hypothesis').length < 2, `猜测不该占两个名额：${kept.join(',')}`)
+    // 纠正与偏好必须留下（它们直接影响后续行为）
+    assert.ok(kept.includes('correction'), '纠正必须留下')
+    assert.ok(kept.includes('preference'), '偏好必须留下')
+  })
+
+  it('同形态降权：五个名额不会被同一种形态占满，但真值钱的照样能进', () => {
+    const allProcedure = [
+      candidate('procedure', '步骤一：先查类目'),
+      candidate('procedure', '步骤二：再填属性'),
+      candidate('procedure', '步骤三：最后提交'),
+      candidate('procedure', '步骤四：等待审核结果'),
+      candidate('procedure', '步骤五：归档并通知'),
+      candidate('preference', '以后都用中文回复我'),
+      candidate('correction', '更正：上一条说错了，类目不是三级'),
+    ]
+    const kept = selectTopCandidates(allProcedure, 5).selected.map(item => item.type)
+    // 软性多样性：同形态每次被选后降权 15 分，**不硬禁** —— 所以不能断言"最多 2 条"，
+    // 只能断言"没被同种形态占满，且更好的那两类一定在"。
+    assert.ok(kept.filter(type => type === 'procedure').length < 5, `五个名额被 procedure 占满：${kept.join(',')}`)
+    assert.ok(kept.includes('preference') && kept.includes('correction'), `偏好与纠正必须留下：${kept.join(',')}`)
+  })
+
+  it('同一句话只说一次：完全一致或"加长版"算重复', () => {
+    const base = '以后所有报价单一律使用人民币结算，不要再用美元'
+    const near = `${base}结算`
+    // ⚠️ limit 必须小于候选数，否则会走"小规模不裁剪"直接返回 —— 测不到去重
+    const result = selectTopCandidates([
+      candidate('preference', base),
+      candidate('preference', near),
+      candidate('preference', '回复我时先给结论'),
+    ], 2)
+    assert.equal(result.selected.length, 2, result.selected.map(item => item.summary).join(' / '))
+    assert.equal(result.reasons.similar, 1)
+  })
+
+  it('★ 字面相似但语义相反的两条**不许**被判成重复（人民币 / 美元）', () => {
+    // 真反例：只差两个字、相似度 0.9+，但语义相反。自动去重会静默丢掉一条相反的规则 ——
+    // 那比保留一条冗余危险得多。这就是为什么去重只认"同一句话"，不认"字面像"。
+    const result = selectTopCandidates([
+      candidate('preference', '以后所有报价单一律使用人民币结算'),
+      candidate('preference', '以后所有报价单一律使用美元结算'),
+      candidate('preference', '回复我时先给结论'),
+      candidate('procedure', '步骤：先查类目，再填属性'),
+      candidate('correction', '更正：类目不是三级'),
+      candidate('experience', '上次这么干过，实测有效'),
+    ], 5)
+    const kept = result.selected.map(item => item.summary)
+    assert.ok(kept.includes('以后所有报价单一律使用人民币结算'), `人民币那条被吞了：${kept.join(' / ')}`)
+    assert.ok(kept.includes('以后所有报价单一律使用美元结算'), `美元那条被吞了：${kept.join(' / ')}`)
+  })
+
+  it('extractCandidates 超额时只留 5 条，且取舍结果可见', () => {
+    // 8 条互不相同的用户消息 ⇒ 只取 5，并如实报"收集了多少、掉了多少"。
+    const texts = [
+      '以后报价一律用人民币结算',
+      '更正：上一条说错了，类目不是三级',
+      '步骤：先查类目，再填属性，最后提交',
+      '上次这么干过，实测有效，能跑通',
+      '回复我时先给结论再给依据',
+      '记住：周五不要安排发布',
+      '这条其实是一个很长的背景说明，用来占位并让长度落在中等区间内，便于排序',
+      '也许下周会变，不确定',
+    ]
+    const messages = texts.map((text, index) => message(index + 1, text))
+    const result = extractCandidates(messages, {
+      batchId: '001',
+      candidateId: (batchId, index) => `${batchId}-${index + 1}`,
+    })
+    assert.equal(result.candidates.length, CANDIDATE_LIMIT)
+    assert.equal(result.stats.collected, 8)
+    assert.equal(result.stats.capped.limit, CANDIDATE_LIMIT)
+    assert.equal(result.stats.capped.dropped, 3)
+    assert.ok(result.stats.capped.dropped > 0)
+  })
+
+  it('打分只看可解释维度：同一文本多次打分结果恒定', () => {
+    const item = candidate('preference', '以后报价一律用人民币（依据 §3.2）')
+    assert.equal(candidateScore(item), candidateScore(item))
   })
 })

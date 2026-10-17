@@ -216,7 +216,7 @@ describe('clean-test-state --scan —— 识别残留（只读）', () => {
 describe('默认预设根随工作区走（2.1.0）', () => {
   it('★ 不给 --preset-root 时，默认根＝<工作区>/.dsh/preset-bundles', async () => {
     // 2.0.0 的默认根是 `<dshHome>/preset-bundles` —— 那里现在住着**部署方自己的组合包**
-    // （如 `dsh-migrated-presets`，一个文件里声明 12 个预设），不属于本插件。
+    // （如 `example-presets`，一个文件里声明 12 个预设），不属于本插件。
     // 若默认还指向它，本工具会去数别人的产物 ⇒ 既可能误报，也可能误删。
     const ws = join(root, 'ws-default-root')
     const expectedRoot = join(ws, '.dsh', 'preset-bundles')

@@ -51,7 +51,7 @@ export const GENERATED_MARKER = '@yiyunet/dsh-learn-skills'
  * `config.presetDir` 同口径 —— `<工作区>/.dsh/preset-bundles`）。
  *
  * ⚠️ 2.0.0 及更早的宿主级落点 `<dshHome>/preset-bundles` **不再被默认扫描**：
- *   那里现在住着的是部署方自己的组合包（如 `dsh-migrated-presets`），
+ *   那里现在住着的是部署方自己的组合包（如 `example-presets`），
  *   不属于本插件，**不该被本工具当成自己的产物**。要处理旧落点请显式传 `--preset-root`。
  * @param {string} [workspace] 工作区根（默认当前目录）
  * @returns {string} 绝对路径

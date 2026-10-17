@@ -16,3 +16,8 @@ Thumbs.db
 
 # 发布产物
 *.tgz
+
+# pnpm 误生成物：本包以 npm 为准（权威锁文件是 package-lock.json）。
+# 它们由工作区里的 pnpm 操作带出来的，两个锁文件并存会让消费者不知道该信哪个。
+pnpm-lock.yaml
+pnpm-workspace.yaml

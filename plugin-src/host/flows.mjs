@@ -16,7 +16,7 @@ import { homedir } from 'node:os'
 import { collect, audit, renderAuditReport } from './audit.mjs'
 import { readDirectory, readJson, readText, withLock, writeIfChanged } from './fsx.mjs'
 import {
-  CANDIDATE_TYPES, DECISION, contentChanged, dedupeCandidates, extractCandidates,
+  CANDIDATE_LIMIT, CANDIDATE_TYPES, DECISION, contentChanged, dedupeCandidates, extractCandidates,
   findMissingNodes, fixRange, loadNodes as loadNodeFiles, mergeSemanticSuggestions,
   parseFrontmatter, relateToNodes, renderNode, VERIFICATION,
 } from './knowledge.mjs'
@@ -32,6 +32,7 @@ import {
 import { BatchesStore, BaselineStore, KnownStore, SessionStore, openJournal } from './status.mjs'
 import { MIN_ROUNDS, generateSemanticSuggestions, generateThemeMap } from './model.mjs'
 import { redact } from './redact.mjs'
+import { batchChoice, distillEmptyReason, distillOverview, plainText } from './ui-text.mjs'
 
 /** 学习插件的四入口（界面顺序即此顺序，固定不变）。 */
 export const ENTRIES = Object.freeze([
@@ -156,7 +157,7 @@ export function createFlows(options) {
    * ⚠️ 为什么不能靠"扫目录/扫文件"：DSH 0.1.7-alpha.1 起预设是**声明式**的，
    *   身份＝声明行里的 `config.id`，而注册表**不扫描目录、也不接受 preset 路径**
    *   （`agent-preset-registry/README.zh.md:46`）。一份组合包可以声明**很多**个预设
-   *   （本机 `dsh-migrated-presets` 一个文件里就有 12 个）—— 按目录名数只会数出
+   *   （本机 `example-presets` 一个文件里就有 12 个）—— 按目录名数只会数出
    *   "1 个"，而那个"1 个"的名字还会取错（取到文件里第一个非包名 `name:`）。
    *   官方还明写：**重复的 preset ID 会导致声明加载失败**（`agent-preset/README.zh.md:82`）。
    *   ⇒ 判据必须是名册本身，否则就是在用一个坏的镜子照自己。
@@ -214,11 +215,14 @@ export function createFlows(options) {
     const agent = liveAgentFor(hooks.sessionId)
     try {
       const result = await ctx.userQuestions.ask({
+        // ★ 提问面是**纯文本**渲染：题面与说明里写 `**多选**` 会连着星号一起显示。
+        //   在一处剥（所有问题、所有入口都走这里），比在每个题面各记一遍可靠 ——
+        //   实测截图里就是这么露出来的。
         questions: questions.map(question => ({
           id: question.id,
-          question: question.question,
-          ...question.header === undefined ? {} : { header: question.header },
-          ...question.detail === undefined ? {} : { detail: question.detail },
+          question: plainText(question.question),
+          ...question.header === undefined ? {} : { header: plainText(question.header) },
+          ...question.detail === undefined ? {} : { detail: plainText(question.detail) },
           ...question.options === undefined ? {} : { options: question.options },
           ...question.multiSelect === undefined ? {} : { multiSelect: question.multiSelect },
         })),
@@ -1139,6 +1143,37 @@ export function createFlows(options) {
         running,
       }
     }
+    // ★ 读不到消息就**直接说失败**，不再产一个"0 条候选"的空批次。
+    //
+    //   旧行为（2.2.2 及更早）：`fixRange([])` 判成「完整历史」，写下一个 0 条候选的
+    //   批次，界面上只剩一张空表 —— 用户看到的是"什么都没提炼出来"，实际是"一条消息
+    //   都没读到"，而且盘上会不断堆积空批次（真机已堆了 3 个）。宁可不产，也要说清原因。
+    const readStats = target.readStats ?? null
+    if (target.messages.length === 0) {
+      const types = Array.isArray(readStats?.eventTypes)
+        ? readStats.eventTypes.map(item => `${item.type}×${item.count}`).join('、')
+        : ''
+      // 三种"读不到"必须分开说，否则又会退回"一句空话"：
+      //   `none`      ＝ 宿主没有可识别的事件读取接口（API 变了）
+      //   0 条事件     ＝ 会话里真的没有事件
+      //   >0 条事件    ＝ 读到了，但没有一条能抽成消息（类型不符/文本抽不出）
+      const eventsSource = readStats?.eventsSource ?? null
+      const eventsRead = readStats?.eventsRead ?? null
+      const reason = eventsSource === 'none'
+        ? '宿主没有提供可识别的事件读取接口（`snapshotEvents` 与 `events` 都不存在）'
+        : eventsRead === 0
+          ? '会话里没有事件'
+          : `读到了事件但没有一条能抽成消息（类型：${types === '' ? '未知' : types}）`
+      return {
+        ok: false,
+        code: 'NO_MESSAGES',
+        message: `没有读到本会话的任何消息 —— ${reason}。因此本次没有新建批次。`
+          + `（读取路径 ${eventsSource ?? '未知'}，会话事件 ${eventsRead ?? '?'} 条`
+          + `${types === '' ? '' : `，类型：${types}`}）`
+          + '请在会话里对话几轮再试；若你确认会话里有内容，请把这行读数发我。',
+        readStats,
+      }
+    }
     // 先落断点：界面据此显示"某流程正在运行"，并发点击者据此被明确拒绝。
     await store.session.open('distill', { step: 'collect', answers: {} })
 
@@ -1164,7 +1199,10 @@ export function createFlows(options) {
         batchId: batch.batchId,
         existing: ledger.seen,
         candidateId,
-        maxCandidates: 60,
+        // 每会话上限 5 条（第一性原理：上限是**逼出取舍**，不是省事）。
+        // 超额时不是"砍掉后面的"，而是按「类型价值＋规范性措辞＋可核证据＋信息密度」排序，
+        // 再按「同类不过二 / 近似去重」挑出最该占名额的 5 条 —— 见 `selectTopCandidates`。
+        maxCandidates: config.maxCandidatesPerSession ?? CANDIDATE_LIMIT,
       })
       const deduped = dedupeCandidates(extracted.candidates)
       relateToNodes(deduped.candidates, nodes)
@@ -1209,6 +1247,8 @@ export function createFlows(options) {
         complete: range.complete,
         limitations: range.limitations,
         stats: { ...extracted.stats, merged: deduped.merged, semantic },
+        // 读统计随批次落盘：事后排查"这批为什么是空的"时，它是唯一的判据。
+        readStats,
         candidates: deduped.candidates,
         semantic,
       })
@@ -1262,13 +1302,19 @@ export function createFlows(options) {
     })
     await store.session.clear()
 
-    return {
+    // ★ 先把结果对象拼出来，再由它生成**给界面看的**总览与空批原因。
+    //   顺序要紧：界面文案必须从**同一份数据**算出来（而不是各处按自己的理解拼），
+    //   否则"界面上说的"与"实际发生的"会再次漂移 —— 这正是本次报的 bug 之一。
+    const payload = {
       ok: true,
       batchId: batch.batchId,
+      createdAt: batch.createdAt,
       complete: range.complete,
       range: range.range,
       limitations: range.limitations,
       stats,
+      // 读统计：读不到消息是**事实**，要跟着结果一起回到界面（别让它只留在日志里）。
+      readStats,
       // ★ 语义轨字段必须在这里显式带出：本映射是**白名单式**的，漏一个字段
       //   界面上就少一列信息，而且不会有任何报错（静默丢数据）。
       semantic: semanticSummary,
@@ -1288,8 +1334,16 @@ export function createFlows(options) {
       })),
       kept: decided.candidates.filter(candidate => candidate.decision === DECISION.keep).length,
       excluded: decided.candidates.filter(candidate => candidate.decision === DECISION.exclude).length,
-      message: `候选已生成（批次 ${batch.batchId}）。本阶段**没有**修改任何正式知识、预设或 AGENTS.md。`
-        + '下一步请点「关联升级」做比对与写入审核。',
+      // 被跳过的样例（最多 3 条）：回答"收集到了什么、为什么没变成候选"。
+      skippedSamples: Array.isArray(stats?.skippedSamples) ? stats.skippedSamples : [],
+      message: plainText(`候选已生成（批次 ${batch.batchId}）。本阶段**没有**修改任何正式知识、预设或 AGENTS.md。`
+        + '下一步请点「关联升级」做比对与写入审核。'),
+    }
+    return {
+      ...payload,
+      // 界面直接逐行渲染这两项，不再由客户端各拼一套（单一实现见 ui-text.mjs）。
+      overview: distillOverview(payload),
+      emptyReason: distillEmptyReason(payload),
     }
   }
 
@@ -1302,43 +1356,106 @@ export function createFlows(options) {
     const already = actionable.filter(candidate => candidate.alreadyProcessed !== null)
     const fresh = actionable.filter(candidate => candidate.alreadyProcessed === null)
 
-    for (let offset = 0; offset < fresh.length; offset += 8) {
-      const chunk = fresh.slice(offset, offset + 8)
-      const questions = [{
-        id: `review-${chunk[0].id}`,
-        header: `候选裁决 ${offset + 1}–${Math.min(offset + 8, fresh.length)} / 共 ${fresh.length}`,
-        question: chunk.map((candidate, index) => `${index + 1}. [${candidate.type}] ${candidate.summary.slice(0, 160)}`).join('\n'),
-        detail: `批次 ${batchId}。请选出你**认可保留**的编号（可多选）；不选的按「排除」处理。`
-          + '若其中有你暂时无法判断的，选「标记待验证」——待验证不等于已证实。',
+    // ★ 一条候选一题、单选、首项「保留（推荐）」（2026-10 真机改造）。
+    //
+    //   旧形态：8 条候选塞进**一道多选题**的题干（每题 8 行 × 160 字会话原文），
+    //   选项是「全部保留 / 保留 1…8」。真机后果两个，都很实在：
+    //   ① 题干是一堵墙 —— 人读不出"这条说的是什么"，因为它是被截断的原文；
+    //   ② `multiSelect` 没有默认值 ⇒ `提交` 一直灰着（宿主 `answered()` 要求先勾选）。
+    //   新形态按第一性原理：**人只处理分歧，机器先把结论摆好**。
+    //   - 一题一条，题干只有一行（≤48 字、空白折叠），类型/字数走 detail；
+    //   - 单选，且 `options[0]` 以「（推荐）」结尾 ⇒ 宿主**隐式预选**它
+    //     （`QuestionComposer.tsx:174-176`）⇒ 不改就是"保留"，提交随时可用；
+    //   - 单选点选即自动跳下一题（`choose()` 对 non-multiSelect 会 index+1）。
+    const LABEL_KEEP = '保留（推荐）'
+    const LABEL_EXCLUDE = '排除'
+    const LABEL_UNVERIFIED = '标记待验证（本轮不写知识）'
+    // 一次问多少条：单题只手点一次，故可放宽；仍设上限，避免单张卡过大。
+    const REVIEW_CHUNK = 40
+    // 准入结果（供上层如实回报）：`null` = 根本没问过准入（旧形态），不假装判过。
+    let admissionOutcome = null
+    for (let offset = 0; offset < fresh.length; offset += REVIEW_CHUNK) {
+      const chunk = fresh.slice(offset, offset + REVIEW_CHUNK)
+      // ★ 准入闸：**答不出一句具体的话，就不入库**（2026-10 老板裁定的口径）。
+      //
+      //   判据（照抄）：「本次要改 AGENTS.md 的哪一句？不改会导致 Agent 下次做错什么？
+      //   证据是本次会话的哪几条？」
+      //   执行要可判定，所以只认一件事：**人有没有亲手写出那句话**（≥8 字）。
+      //   点选项不算 —— 选项只是"意图"（改 AGENTS.md / 只更新节点），不是句子本身。
+      //   因此：说出句子 ⇒ 入库；说不出 ⇒ 全部候选判"不入库"，**零产出是正确结果**，
+      //   不是失败（旧行为那种"来都来了总得写点什么"才是要治的病）。
+      //   首项即默认（宿主会隐式预选带「（推荐）」的首项）⇒ 什么都不做＝不入库。
+      const ADMIT_DENY = '本轮不入库（推荐）'
+      const ADMIT_ANSWER_MIN = 8
+      const admission = {
+        id: `admission-${chunk[0].id}`,
+        header: '准入',
+        question: '本次要改哪一句？（写不出一句就选第一项）',
+        detail: '判据：说不清"不改会让 Agent 下次做错什么"，就不入库；零产出是正确结果。'
+          + ' 要入库，请在下方写下那句话（≥8 字），类型选「改 AGENTS.md」或「只更新知识节点」。',
         options: [
-          { label: '全部保留' },
-          ...chunk.map((candidate, index) => ({ label: `保留 ${index + 1}`, description: candidate.title.slice(0, 40) })),
-          { label: '标记待验证（本轮不写知识）' },
+          { label: ADMIT_DENY, description: '默认；不写任何文件' },
+          { label: '改 AGENTS.md —— 在下方写下那一句' },
+          { label: '只更新知识节点 —— 在下方写下那一条' },
+          { label: CANCEL_SENTINEL, description: '中断裁决；批次已保存，可续办' },
+        ],
+        multiSelect: false,
+      }
+      const questions = [admission, ...chunk.map((candidate, index) => ({
+        id: `review-${candidate.id}`,
+        header: `候选 ${offset + index + 1} / 共 ${fresh.length}`,
+        question: oneLine(candidate.summary, 48),
+        detail: `[${candidate.type}] · ${candidate.summary.length} 字 · 批次 ${batchId}`,
+        options: [
+          { label: LABEL_KEEP, description: candidate.title.slice(0, 40) },
+          { label: LABEL_EXCLUDE },
+          { label: LABEL_UNVERIFIED },
           { label: SKIP_OPTION.label },
           { label: CANCEL_SENTINEL, description: '中断裁决；批次已保存，可续办' },
         ],
-        multiSelect: true,
-      }]
+        multiSelect: false,
+      }))]
       const asked = await ask(questions, signal, hooks)
       if (asked.kind === 'cancelled') return { kind: 'cancelled', candidates }
-      const selected = new Set(asked.answers[0]?.selected ?? [])
-      const custom = answeredCustom(asked.answers[0])
-      const all = selected.has('全部保留')
-      const unverified = selected.has('标记待验证（本轮不写知识）') || selected.has(SKIP_OPTION.label)
+      // 兼容两种回传形态（都要，缺一个就是线上/测试二选一崩）：
+      //   ① 新形态：每题一条答案（首条是准入，其后逐条候选）；
+      //   ② 旧形态／桩：整批只回一条 ⇒ 视作对全批的统一裁决，且**视为已过准入**
+      //      （根本没问过准入，就不能用"没写句子"去否掉整批 —— 否则老客户端全废）。
+      const perQuestion = asked.answers.length > 1
+      const batchWide = !perQuestion && chunk.length > 1 ? asked.answers[0] : undefined
+      // 准入判定：只认"人有没有亲手写出那句话"（≥8 字）。点选项不算句子。
+      const admitAnswer = perQuestion ? asked.answers[0] : undefined
+      const sentence = (admitAnswer?.custom ?? '').trim()
+      const admitted = perQuestion ? sentence.length >= ADMIT_ANSWER_MIN : true
+      const admitNote = admitted
+        ? ''
+        : '准入未通过：没有写下"要改的那一句"（≥8 字）⇒ 本轮不入库。零产出是正确结果。'
       chunk.forEach((candidate, index) => {
-        const keep = all || selected.has(`保留 ${index + 1}`) || (custom !== '' && custom.includes(String(index + 1)))
+        const answer = batchWide ?? asked.answers[perQuestion ? index + 1 : index]
+        const picked = (answer?.selected ?? [])[0] ?? ''
+        const custom = answeredCustom(answer)
+        // 单选的第一个标签就是"保留"（一律以「保留」开头）；也兼容旧测试/旧客户端
+        // 可能回传的「全部保留」「保留 N」。自定义文本与单选并存时宿主只回 custom，
+        // 故自定义里出现"排除/不要"才判排除，其余按保留。
+        const keep = admitted
+          && (picked.startsWith('保留') || picked === '全部保留'
+            || (picked === '' && custom !== '' && !/排除|不要|删掉/u.test(custom)))
         reviewed.push({
           ...candidate,
           decision: keep ? DECISION.keep : DECISION.exclude,
           // ★ 用户点了保留 ≠ 已证实。verification 只在用户另外明确时才变，见下。
           verification: VERIFICATION.unverified,
-          unverifiedFlag: unverified,
+          unverifiedFlag: picked === LABEL_UNVERIFIED || picked === SKIP_OPTION.label,
+          ...admitNote === '' ? {} : { note: admitNote, admitted: false, admissionSentence: sentence },
         })
       })
+      if (!admitted) admissionOutcome = { admitted: false, sentence: '' }
+      else if (sentence !== '') admissionOutcome = { admitted: true, sentence }
     }
 
     return {
       kind: 'answered',
+      ...admissionOutcome === null ? {} : { admission: admissionOutcome },
       candidates: [...reviewed, ...already.map(candidate => ({
         ...candidate,
         decision: DECISION.keep,
@@ -1350,6 +1467,22 @@ export function createFlows(options) {
 
   function answeredCustom(answer) {
     return typeof answer?.custom === 'string' ? answer.custom : ''
+  }
+
+  /**
+   * 压成一行：折叠空白、超长截断。
+   *
+   * 为什么要它：候选题干来自会话原文，里面满是换行、Markdown 标记与
+   * `<system-reminder>` 之类的注入壳子。原样展示的结果是"一堵墙"——
+   * 真机截图里用户根本读不出这条讲什么。题干只回答"这条说的是什么"，
+   * 类型与字数走 `detail`。
+   * @param {string} text 原文
+   * @param {number} max 上限字符数
+   * @returns {string} 单行摘要
+   */
+  function oneLine(text, max) {
+    const flat = String(text ?? '').replace(/\s+/gu, ' ').trim()
+    return flat.length <= max ? flat : `${flat.slice(0, max)}…`
   }
 
   // ── 入口 3：关联升级 ──────────────────────────────────────────────────
@@ -1385,24 +1518,66 @@ export function createFlows(options) {
         message: '没有待处理的候选批次。请先点「收集提炼」产出一批候选。',
       }
     }
-    let chosen = usable
+    // ★ 0 条候选的批次**不当成"可处理"**：选进去只会得到"没有可写入的变更"，
+    //   而用户看不出这是死路（真机反馈：三个批次全是 0 条候选，无从选择）。
+    //   这里把它们分出去，只在"全部都空"时整体报错，否则如实说明跳过了几个。
+    const countOf = item => (Array.isArray(item.file.candidates) ? item.file.candidates.length : 0)
+    const offered = usable.filter(item => countOf(item) > 0)
+    const empties = usable.filter(item => countOf(item) === 0)
+    if (offered.length === 0) {
+      return {
+        ok: false,
+        code: 'NO_CANDIDATES',
+        message: `待处理的 ${usable.length} 个批次里都没有候选（${usable.map(item => item.batch.batchId).join('、')}）`
+          + ' —— 它们多半是"没读到会话消息"的空跑。请先点「收集提炼」重新产出候选。',
+        batches: usable.map(item => item.batch.batchId),
+      }
+    }
+    const skippedNote = empties.length === 0
+      ? ''
+      : `（已跳过 ${empties.length} 个没有候选的批次：${empties.map(item => item.batch.batchId).join('、')}）`
+    let chosen = offered
     if (request.batchId !== undefined) {
-      const found = usable.find(item => item.batch.batchId === request.batchId)
+      const found = offered.find(item => item.batch.batchId === request.batchId)
       if (found === undefined) {
-        return { ok: false, code: 'UNKNOWN_BATCH', message: `找不到批次 ${request.batchId} 或它已处理完。` }
+        const empty = empties.find(item => item.batch.batchId === request.batchId)
+        return empty === undefined
+          ? { ok: false, code: 'UNKNOWN_BATCH', message: `找不到批次 ${request.batchId} 或它已处理完。` }
+          : {
+            ok: false,
+            code: 'NO_CANDIDATES',
+            message: `批次 ${request.batchId} 里没有候选（0 条）—— 请重新提炼，或换一个批次。`,
+          }
       }
       chosen = [found]
-    } else if (usable.length > 1) {
+    } else if (offered.length > 1) {
       // 多批时不替用户挑：让他明确选。
+      //
+      // ⚠️ 选项必须**说清里面是什么**：只给「批次 002 + 时间 + 0 条候选」时，
+      //    用户没有任何依据在几批之间做选择（真机反馈原话："让用户看不明白"）。
+      //    label 仍以「批次 <id>」开头 —— `upgrade()` 靠它反解批次 id，格式化与
+      //    反解是同一处约定（见 ui-text.mjs 的 `batchChoice`）。
+      // 内容雷同的批次：同一次会话反复提炼，前若干条候选往往一模一样 ——
+      // 摘要于是无法区分（真机截图：批次 005 与 006 的预览一字不差），用户只能在
+      // 两段相同文字里瞎选。这里按"前 20 条标题的序列"做指纹，与更早的一批相同时
+      // 直接在选项上点名重复对象。**不改数据、不删批次**，只是把事实说出来。
+      const fingerprint = item => (item.file.candidates ?? [])
+        .slice(0, 20)
+        .map(candidate => String(candidate?.title ?? candidate?.summary ?? ''))
+        .join('|')
+      const seenFingerprints = new Map()
+      const duplicateOf = item => {
+        const key = fingerprint(item)
+        const first = seenFingerprints.get(key)
+        if (first === undefined) seenFingerprints.set(key, item.batch.batchId)
+        return first
+      }
       const asked = await ask([{
         id: 'pick-batch',
         header: '选择要处理的批次',
-        question: '有多个待处理批次，请选择本次处理哪一个。',
+        question: `有多个待处理批次，请选择本次处理哪一个（每一项都列出里面的候选）。${skippedNote}`,
         options: [
-          ...usable.map(item => ({
-            label: `批次 ${item.batch.batchId}`,
-            description: `${item.batch.createdAt ?? ''} · ${item.file.candidates?.length ?? 0} 条候选`,
-          })),
+          ...offered.map(item => batchChoice(item.batch, item.file, { duplicateOf: duplicateOf(item) })),
           { label: CANCEL_SENTINEL, description: '不处理' },
         ],
         multiSelect: false,
@@ -1411,7 +1586,7 @@ export function createFlows(options) {
         return { ok: false, code: 'FLOW_CANCELLED', message: '已取消；没有选择任何批次。' }
       }
       const label = (asked.answers[0]?.selected ?? [])[0] ?? ''
-      const picked = usable.find(item => label.includes(item.batch.batchId))
+      const picked = offered.find(item => label.startsWith(`批次 ${item.batch.batchId}`))
       if (picked === undefined) return { ok: false, code: 'NO_BATCH', message: '没有选中有效批次。' }
       chosen = [picked]
     }
@@ -1467,9 +1642,9 @@ export function createFlows(options) {
             + `${item.indexed.title === null ? '' : ` · ${item.indexed.title}`}`
             + `${item.indexed.updated === null ? '' : ` · 更新于 ${item.indexed.updated}`}`)
           .join('\n\n'),
-        detail: '这些文件在总索引里有记录，但当前载入不了（通常是手工编辑后 frontmatter 丢失）。'
+        detail: plainText('这些文件在总索引里有记录，但当前载入不了（通常是手工编辑后 frontmatter 丢失）。'
           + '**重建**会按本插件的写入语义重写节点正文，当前文件内容会**原样存进变更日志**，'
-          + '事后可用回滚完整取回。不重建则它们继续缺席于关联与体检。',
+          + '事后可用回滚完整取回。不重建则它们继续缺席于关联与体检。'),
         options: [
           { label: '全部重建' },
           ...repairs.map((item, index) => ({ label: `重建 ${index + 1}`, description: item.relative })),
@@ -1593,10 +1768,10 @@ export function createFlows(options) {
         duplicateCount: noChange.length,
         ruleChanges,
         requiresBehaviorRuleApproval: ruleChanges.length > 0,
-        message: '以上是最终变更清单（目标路径 / 操作 / 理由 / 影响范围）。确认后写入。'
+        message: plainText('以上是最终变更清单（目标路径 / 操作 / 理由 / 影响范围）。确认后写入。'
           + (ruleChanges.length > 0
             ? '⚠️ 清单里含**行为规则**变更（预设提示词 / AGENTS.md / 技能），须单独确认。'
-            : ''),
+            : '')),
       }
     }
 

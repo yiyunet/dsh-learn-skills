@@ -139,7 +139,82 @@ export async function collect(options) {
     }
   }
 
+  // ★ 预设 bundle 也在扫描面内：它们由本插件生成，且会被宿主当**提示词模板**插值
+  //   （`{{cwd}}` 事故正是这样漏掉的 —— 报告全绿、预设一选就炸）。判据与写法在
+  //   `scanPresetBundles`，这里只负责把文件并进清单，好让 ⑯ 已知问题与 ⑰ 变化对比看到它们。
+  const presetRoots = options.presetRoots
+    ?? [`${workspace}/${dirs?.presetDir ?? '.dsh/preset-bundles'}`]
+  const presetScan = await scanPresetBundles({ roots: presetRoots, workspace })
+  for (const file of presetScan.files) {
+    if (manifest.length >= maxFiles) {
+      limitations.push(`文件数达上限 ${maxFiles}，预设 bundle 之后的条目未全部读取`)
+      break
+    }
+    manifest.push(await entryOf({
+      absolute: file.absolute,
+      relative: file.relative,
+      kind: 'preset-bundle',
+      text: file.text,
+      maxBytes,
+    }))
+  }
+
   return { manifest, limitations, unreadable }
+}
+
+/**
+ * 在一份 YAML 文本里找「提示词变量」写法，返回**逐行**命中。
+ *
+ * 判据只认成对/成单的花括号（`{{` 或 `}}`）：YAML 的 `!!js process.platform === 'win32'`
+ * 与数学里的单个 `{x}` 都不命中 —— 体检要拦的是"会被宿主当变量插值"的写法，
+ * 不是所有花括号。
+ * @param {string} text 文件内容
+ * @returns {{ line: number, text: string }[]} 命中的行号（1 起）与去首尾空白的原文
+ */
+export function findPromptVariableLines(text) {
+  const out = []
+  String(text ?? '').split('\n').forEach((line, index) => {
+    if (/\{\{|\}\}/u.test(line)) out.push({ line: index + 1, text: line.trim() })
+  })
+  return out
+}
+
+/**
+ * 扫描**已生成的预设 bundle**（`<root>/<id>/cordis.patch.yml`）。
+ *
+ * 为什么体检要管预设：这些文件由本插件自己生成，且会被宿主当作提示词**模板**插值。
+ * 一次真实事故（两台真机都踩过）就是这里漏掉的 —— 生成器把 `{{cwd}}` 写进
+ * `persona.suffix`，而 DSH 0.2.1-alpha.1 起只注册 `provider` / `model`，严格插值下
+ * 直接抛错；体检当时看不见这些文件，于是"报告一切正常，预设一选就炸"。
+ *
+ * 只读：不修、不改、不重写任何预设（修复要人决定 —— 重建还是手改，代价不同）。
+ * @param {object} options 选项
+ * @param {string[]} options.roots 预设根（绝对路径）；可为工作区内与工作区外的多个
+ * @param {string} [options.workspace] 工作区根（给出时返回相对路径，报告里更好读）
+ * @returns {Promise<{ files: { absolute: string, relative: string, text: string }[], findings: { source: string, line: number, text: string }[], roots: string[] }>} 结果
+ */
+export async function scanPresetBundles(options = {}) {
+  const roots = [...(options.roots ?? [])].filter(root => typeof root === 'string' && root !== '')
+  const workspace = options.workspace
+  const files = []
+  const findings = []
+  for (const root of roots) {
+    const entries = await readDirectory(root)
+    if (entries.length === 0) continue
+    for (const entry of entries) {
+      // 目录形态（本插件的落点：`<id>/cordis.patch.yml`）
+      const absolute = entry.directory
+        ? `${root}/${entry.name}/cordis.patch.yml`
+        : entry.name === 'cordis.patch.yml' ? `${root}/${entry.name}` : undefined
+      if (absolute === undefined) continue
+      const text = await readText(absolute)
+      if (text === undefined) continue
+      const relative = workspace === undefined || workspace === '' ? absolute : toRelative(workspace, absolute)
+      files.push({ absolute, relative, text })
+      for (const hit of findPromptVariableLines(text)) findings.push({ source: relative, ...hit })
+    }
+  }
+  return { files, findings, roots }
 }
 
 /** 单个文件 → 清单条目（带脱敏、指纹、上限标注）。 */
@@ -349,6 +424,9 @@ export function audit(options) {
   issues.push(...dangling)
   const stale = detectStaleByEvidence(nodes)
   issues.push(...stale)
+  // ★ 预设 bundle 里的提示词变量：**这是"选中即失败"级别的**，必须出现在这里。
+  const presetVariableIssues = detectPresetPromptVariables(byKind('preset-bundle'))
+  issues.push(...presetVariableIssues)
   if (collected.limitations.length > 0) {
     issues.push({
       kind: 'scan-limit',
@@ -390,6 +468,19 @@ export function audit(options) {
   if (byKind('framework').length === 0) warnings.push({ code: 'NO_FRAMEWORK', detail: '未找到 knowledge/framework.md —— 知识库总索引缺失' })
   if (nodes.length === 0) warnings.push({ code: 'NO_NODES', detail: '未找到知识节点（knowledge/nodes/*.md）' })
   if (agentRules === undefined) warnings.push({ code: 'NO_AGENTS', detail: '工作区根 AGENTS.md 缺失' })
+  // 预设级问题单独提到"需要先解决的结构问题"里：它会让一个预设**完全不可用**，
+  // 埋在 ⑯ 的第 20 条里没人会翻到。
+  if (presetVariableIssues.length > 0) {
+    const offending = byKind('preset-bundle')
+      .filter(file => findPromptVariableLines(file.text).length > 0)
+      .map(file => file.relative)
+    warnings.push({
+      code: 'PRESET_PROMPT_VARIABLE',
+      detail: `${presetVariableIssues.length} 处预设配置含提示词变量（${offending.join('、')}）`
+        + ' —— 该预设与 DSH 0.2.1+ 不兼容，选中即报 unknown prompt variable。'
+        + '请重建预设，或按 CHANGELOG 2.2.2 的等价替换手工改掉那一行。',
+    })
+  }
 
   const baselineNext = {
     workspace: toRelative(collected.workspace ?? '', collected.workspace ?? ''),
@@ -518,6 +609,32 @@ function detectStaleByEvidence(nodes) {
     }
   }
   return out.slice(0, 20)
+}
+
+/**
+ * 预设 bundle 里的提示词变量 —— 与 DSH 0.2.1+ **不兼容**，选中即失败。
+ *
+ * 报错要给出**文件路径 + 行号 + 命中行原文**：修法有"重建"与"手改"两条，
+ * 代价不同（重建会换新 id、手改要动 YAML），只有看到具体是哪一行，人才判得动。
+ * @param {object[]} files 清单里 `kind === 'preset-bundle'` 的条目
+ * @returns {object[]} issues 条目
+ */
+function detectPresetPromptVariables(files) {
+  const out = []
+  for (const file of files) {
+    for (const hit of findPromptVariableLines(file.text)) {
+      out.push({
+        kind: 'prompt-variable',
+        severity: 'warn',
+        detail: `${file.relative} 第 ${hit.line} 行含提示词变量（\`${hit.text.slice(0, 80)}\`）`
+          + ' —— 该预设与 DSH 0.2.1+ 不兼容：宿主只注册 provider / model，'
+          + '未注册变量在插值时**直接抛错**（严格插值），选中它会在模型请求前失败。'
+          + '请重建预设，或手工删掉那一句（等价替换见 CHANGELOG 2.2.2）。',
+        evidence: 'DSH 0.2.1-alpha.1 起工作目录改由 working-directory 服务作为运行时上下文注入，不再是提示词变量',
+      })
+    }
+  }
+  return out.slice(0, 50)
 }
 
 /** 与基线比较：按**内容指纹**，绝不按修改时间。 */
