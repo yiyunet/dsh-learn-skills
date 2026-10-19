@@ -2,7 +2,7 @@
  * verify-package.mjs —— 发布契约校验（`npm run verify`，CI 会跑）。
  *
  * 校验的不是"代码对不对"，而是**发布形态有没有被破坏**。每条断言都对应一个
- * 真实失败模式（本部门在 `@yiyunet/dsh-dingtalk-connector` 上逐条踩过）：
+ * 真实失败模式（在 `@yiyunet/dsh-dingtalk-connector` 上逐条踩过）：
  *
  *   ① 必需文件齐全（源码 + 构建产物 + 文档）
  *   ② 任何依赖节与 lock 文件都不得出现 @deepseek-ai/dsh-*
@@ -309,7 +309,7 @@ for (const name of injectNames) {
 //    （`plugin-manager/src/index.ts:461-462`，`@Remote`）—— 插件若在**生成路径**里
 //    直接调它，就等于**替用户越权**。
 //
-//    ⚠️ 修订理由（方案 A′，由老板裁定）：原判据把"无人确认的自动安装"与
+//    ⚠️ 修订理由（方案 A′，由维护者裁定）：原判据把"无人确认的自动安装"与
 //    "人工点击触发的安装"一并禁掉了。但本插件的界面要求是"点了就装、不让人去找
 //    预设 id"，于是需要把两者**分开**：
 //      · 允许：用户按下界面「安装预设」按钮 ⇒ RPC `installPreset` ⇒ 调
@@ -371,7 +371,9 @@ check(/export function installInstructions/u.test(hostPreset),
 //     替代做法：下面单独检查 test/ 里**除 fixture 形态之外**的真实本机路径。
 //   · `docs/` 里的示例路径 —— 文档要展示"命令长什么样"，只能写形态化的路径；
 //     判据是"是否含真实用户名"，不是"是否含 C:\Users"。
-const SCAN_ROOTS = ['plugin-src', 'scripts', 'docs']
+// `lib/` 也必须扫：消费者安装的是产物。**源码干净而产物脏**（改了源码忘了重建）
+// 是本仓真实踩过的路径 —— 只扫源码等于没扫发布物。
+const SCAN_ROOTS = ['plugin-src', 'scripts', 'docs', 'lib']
 const files = []
 for (const root of SCAN_ROOTS) await sourceFiles(resolve(ROOT, root), files)
 for (const relativePath of ['package.json', 'cordis.patch.yml', 'README.md', 'README.en.md', 'CHANGELOG.md']) {
@@ -454,9 +456,14 @@ if (privateTermsPath !== undefined && privateTermsPath !== '') {
   const terms = (await readFile(privateTermsPath, 'utf8').catch(() => ''))
     .split('\n').map(line => line.trim()).filter(line => line !== '' && !line.startsWith('#'))
   const termHits = []
+  /** 产物里的 `\uXXXX` 转义要还原后再匹配 —— esbuild 会把中文字符串转义，直接搜原文必然漏。 */
+  const decodeEscaped = text => text.replace(/\\u([0-9A-Fa-f]{4})/gu, (_m, hex) => String.fromCharCode(parseInt(hex, 16)))
   for (const file of files) {
     const text = await readFile(file, 'utf8').catch(() => '')
-    for (const term of terms) if (text.includes(term)) termHits.push(`${file.slice(ROOT.length + 1)} ← 「${term}」`)
+    const decoded = decodeEscaped(text)
+    for (const term of terms) {
+      if (text.includes(term) || decoded.includes(term)) termHits.push(`${file.slice(ROOT.length + 1)} ← 「${term}」`)
+    }
   }
   check(termHits.length === 0, `私有词表命中：\n    - ${termHits.join('\n    - ')}`)
   console.log(`  · 私有词表扫描：${terms.length} 个词，命中 ${termHits.length} 处`)

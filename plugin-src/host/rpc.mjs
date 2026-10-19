@@ -1,7 +1,7 @@
 /**
  * rpc.mjs —— 客户端 ↔ 宿主 RPC 端点。
  *
- * 契约形状是硬性的（沿用本部门已实测过的同一套信封，见 N23）：
+ * 契约形状是硬性的（沿用已实测过的同一套信封）：
  *   客户端：ctx.connection.rpc.call('/api', '<endpoint>', { method, payload }, signal)
  *   宿主：  ctx.connection.fetch.register({ path:'/api/<endpoint>', methods:['POST'],
  *            requestBody:'buffered', fetch })

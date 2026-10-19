@@ -511,7 +511,7 @@ export function createFlows(options) {
 
     // ★ 轮次编排（2026-09-23 改）：前两轮固定（名字 / 三参数），第 3 轮起**由模型
     //   逐轮现场生成** —— 每轮都带上已经采集到的全部上下文，模型据此决定"下一步
-    //   最缺什么"。模型不可用时 `draftQuestion` 内部回退到硬编码候选（老板裁决：
+    //   最缺什么"。模型不可用时 `draftQuestion` 内部回退到硬编码候选（维护者约定：
     //   模型优先、硬编码兜底），因此这条循环**不会**因为模型失败而中断。
     //   `async` 是这里唯一的新增复杂度来源：取题现在要等一次模型调用。
     //
@@ -1376,7 +1376,7 @@ export function createFlows(options) {
     let admissionOutcome = null
     for (let offset = 0; offset < fresh.length; offset += REVIEW_CHUNK) {
       const chunk = fresh.slice(offset, offset + REVIEW_CHUNK)
-      // ★ 准入闸：**答不出一句具体的话，就不入库**（2026-10 老板裁定的口径）。
+      // ★ 准入闸：**答不出一句具体的话，就不入库**（2026-10 维护者约定的口径）。
       //
       //   判据（照抄）：「本次要改 AGENTS.md 的哪一句？不改会导致 Agent 下次做错什么？
       //   证据是本次会话的哪几条？」

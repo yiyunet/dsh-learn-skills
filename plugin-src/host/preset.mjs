@@ -172,7 +172,7 @@ function navOptions() {
  *
  * 失败**不是错误而是常态**（超时 / 限流 / 无凭据 / 输出不合格），一律返回
  * `{ ok: false }` 形态的降级结果，由调用方回退到硬编码候选 —— 提问流程的
- * 确定性不能被一次网络抖动带走。这对应老板拍板的"模型优先、硬编码兜底"。
+ * 确定性不能被一次网络抖动带走。这对应维护者拍板的"模型优先、硬编码兜底"。
  *
  * @param {object} options 入参
  * @param {object} options.ctx 宿主上下文
@@ -366,7 +366,7 @@ export function draftQuestions(answers = {}, options = {}) {
       id: 'vocation',
       topic: 'vocation',
       header: '第 2 题 / 共 7 题 · 身份 · 面向 · 期望',
-      // ★ 一题收三参数（老板裁决 2026-09-23）：宿主 `AskUserQuestionItem` 只有
+      // ★ 一题收三参数（维护者约定 2026-09-23）：宿主 `AskUserQuestionItem` 只有
       //   一个 `question: string` + 一个 `custom` 自由文本（没有"一题多输入框"
       //   这个概念），所以三参数**只能**在一条文本里按段写。给出例子是硬要求 ——
       //   不给例子，用户就只会写"大学生"，于是后面每一题都只能取到"大学生"，
