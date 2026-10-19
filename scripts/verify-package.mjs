@@ -453,8 +453,17 @@ console.log(`  · test/ 单独一轮：${testFiles.length} 个文件，命中 ${
 /** 可选：私有词表（放仓库外，经环境变量挂入；未设置则跳过 —— CI 永不接触这些词）。 */
 const privateTermsPath = process.env.DSH_PRIVATE_TERMS
 if (privateTermsPath !== undefined && privateTermsPath !== '') {
-  const terms = (await readFile(privateTermsPath, 'utf8').catch(() => ''))
+  // 判据：**设了路径，就必须读到一份非空词表**。
+  // 旧写法 `.catch(() => '')` 会把"路径打错 / 文件不存在"降级成"0 个词、命中 0 处"——
+  // 那是一句假绿：长得像"扫过了，很干净"，实际是"根本没扫"。
+  const privateTermsText = await readFile(privateTermsPath, 'utf8').catch(() => undefined)
+  check(privateTermsText !== undefined,
+    `DSH_PRIVATE_TERMS 指向的文件读不到：${privateTermsPath} —— 设了路径就必须可读，否则本项等于没跑`)
+  const terms = (privateTermsText ?? '')
+    .replace(/^\uFEFF/u, '')   // PowerShell 的 UTF8 会写 BOM；不清掉会把首行变成垃圾词
     .split('\n').map(line => line.trim()).filter(line => line !== '' && !line.startsWith('#'))
+  check(terms.length > 0,
+    `DSH_PRIVATE_TERMS 指向的词表是空的（${privateTermsPath}）—— 空词表会让本项恒绿，等于没设`)
   const termHits = []
   /** 产物里的 `\uXXXX` 转义要还原后再匹配 —— esbuild 会把中文字符串转义，直接搜原文必然漏。 */
   const decodeEscaped = text => text.replace(/\\u([0-9A-Fa-f]{4})/gu, (_m, hex) => String.fromCharCode(parseInt(hex, 16)))

@@ -36,7 +36,7 @@ export const name = 'learn-skills'
 export const inject = ['userQuestions', 'commands']
 
 /** 插件版本（status 回显与报告用；与 package.json 一致，由 `verify-package.mjs` 断言）。 */
-const VERSION = '2.2.8'
+const VERSION = '2.2.9'
 
 /** 命令名（斜杠后的名字）。 */
 const COMMAND = 'learn'
