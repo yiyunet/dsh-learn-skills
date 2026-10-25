@@ -49,9 +49,45 @@ export const FAKE_SECRET = ['super', 'secret', 'value'].join('-')
 /** 虚构 PEM 私钥正文段。 */
 export const FAKE_PEM_BODY = 'MIIEowIBAAKCAQEA'
 
+// ── 2026-10-25 补：外部测评 #1321（F3）指出的漏项，各给一个靶子 ──────────────
+// 仍然**运行时拼装**：源码里不出现完整形态，泄漏扫描才不会举报测试自己。
+
+/**
+ * 虚构 GCP API key（`AIza` + 恰好 35 位 —— 正则要求精确长度，多一位就匹配不上）。
+ * 刻意让**最后一位是 `-`**：GCP key 用 base64url 字母表，合法值可以以 `-`/`_` 收尾。
+ * 这一条曾把正则的尾部 `\b` 打暴（`-` 与空格之间没有 word boundary）—— 留作回归哨兵，
+ * 不要为了"让它变绿"而换成以字母结尾的串。
+ */
+export const FAKE_GCP_KEY = ['AIza', 'AbCdEf0123456789-_AbCdEf0123456789-'.slice(0, 35)].join('')
+
+/**
+ * 虚构 GitHub fine-grained PAT（`github_pat_` + 32 位）。
+ * 注意 `_pat_` 前缀本身也是拼装的：早先把 `_` 漏掉拼成 `githubpat_`，
+ * 断言立刻变红。夹具自己写错的失败不许靠改断言糊过去。
+ */
+export const FAKE_GITHUB_PAT = ['github', '_pat_', 'AbCdEf0123456789_AbCdEf0123456789_'.slice(0, 32)].join('')
+
+/** 虚构 Slack webhook URL（本身就是凭据：谁拿到谁就能往群里发消息）。 */
+export const FAKE_SLACK_WEBHOOK = ['https://hooks.slack.com', 'services', 'T0EXAMPLE', 'B0EXAMPLE', 'XXXXEXAMPLEXXXX'].join('/')
+
+/** 虚构中国大陆身份证号（出生日期段合法，纯虚构）。 */
+export const FAKE_ID_CARD = ['110105', '19491231', '002X'].join('')
+
+/** 虚构"非家目录业务路径"（真实测评里原样漏出的形态：带客户名）。 */
+export const FAKE_BIZ_PATH = ['', 'srv', 'clients', 'acme', 'payroll.xlsx'].join('/')
+
+/**
+ * 虚构 `sk-` 令牌，**末位是 `-`**（理由同 FAKE_GCP_KEY）。
+ * 与 FAKE_GCP_KEY 一起看住"令牌尾部边界"这类**跨规则**缺陷：
+ * 谁把结尾断言从 `(?![A-Za-z0-9_-])` 改回 `\b`，这两条会同时变红。
+ */
+export const FAKE_VENDOR_TOKEN_DASH = ['sk-', 'AbCdEf0123456789', 'AbCdEf0123456789', '-'].join('')
+
 /** 全部夹具形态（供扫描器核对"命中是否登记在案"）。 */
 export const ALL_FIXTURES = Object.freeze([
   FAKE_WIN_PATH, FAKE_POSIX_PATH,
   FAKE_VENDOR_TOKEN, FAKE_GHP_TOKEN, FAKE_NPM_TOKEN,
   FAKE_BEARER, FAKE_JWT, FAKE_EMAIL, FAKE_PHONE, FAKE_SECRET, FAKE_PEM_BODY,
+  FAKE_GCP_KEY, FAKE_GITHUB_PAT, FAKE_SLACK_WEBHOOK, FAKE_ID_CARD, FAKE_BIZ_PATH,
+  FAKE_VENDOR_TOKEN_DASH,
 ])

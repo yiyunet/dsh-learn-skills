@@ -17,8 +17,9 @@ import { fingerprint } from '../plugin-src/host/paths.mjs'
 // 夹具由片段拼装（见该模块头注释）：源码里不出现完整形态的假凭证，
 // 于是发布前的泄漏扫描不会举报测试自己。
 import {
-  FAKE_BEARER, FAKE_EMAIL, FAKE_GHP_TOKEN, FAKE_JWT, FAKE_NPM_TOKEN, FAKE_PEM_BODY,
-  FAKE_PHONE, FAKE_POSIX_PATH, FAKE_SECRET, FAKE_VENDOR_TOKEN, FAKE_WIN_PATH,
+  FAKE_BIZ_PATH, FAKE_BEARER, FAKE_EMAIL, FAKE_GCP_KEY, FAKE_GHP_TOKEN, FAKE_GITHUB_PAT,
+  FAKE_ID_CARD, FAKE_JWT, FAKE_NPM_TOKEN, FAKE_PEM_BODY, FAKE_PHONE, FAKE_POSIX_PATH,
+  FAKE_SECRET, FAKE_SLACK_WEBHOOK, FAKE_VENDOR_TOKEN, FAKE_VENDOR_TOKEN_DASH, FAKE_WIN_PATH,
 } from './fixtures.mjs'
 
 const DIRS = {
@@ -104,6 +105,16 @@ describe('redact —— 宁可多打码', () => {
       input: `-----BEGIN RSA PRIVATE KEY-----\n${FAKE_PEM_BODY}\n-----END RSA PRIVATE KEY-----`,
       forbidden: FAKE_PEM_BODY,
     },
+    // ── 2026-10-25 补：外部测评 #1321（F3）点名的漏项 ─────────────────────
+    { rule: '云厂商 GCP API key（AIza）', input: `key ${FAKE_GCP_KEY} 结尾`, forbidden: FAKE_GCP_KEY },
+    { rule: 'GitHub fine-grained PAT（github_pat_）', input: `token ${FAKE_GITHUB_PAT}`, forbidden: FAKE_GITHUB_PAT },
+    { rule: 'Slack webhook URL', input: `通知地址 ${FAKE_SLACK_WEBHOOK} 请勿外传`, forbidden: FAKE_SLACK_WEBHOOK },
+    { rule: '身份证号', input: `证件 ${FAKE_ID_CARD} 已核对`, forbidden: FAKE_ID_CARD },
+    // 令牌**尾部边界**哨兵：见 redact.mjs「令牌结尾断言」注释。
+    // GCP base64url / glpat- / sk- / xox- / JWT / github_pat_ 的字母表都含 `-`/`_`，
+    // 合法令牌可以以它们收尾 —— 那时 `\b` 判不出边界，密钥会原样漏出。
+    // 这几条与上一条 GCP 用例共同看住同一处病灶，不许单条"改断言"绕过。
+    { rule: '厂商令牌 sk- 以连字符结尾', input: `key ${FAKE_VENDOR_TOKEN_DASH} 结尾`, forbidden: FAKE_VENDOR_TOKEN_DASH },
   ]
   for (const testCase of cases) {
     it(`${testCase.rule} 被打码`, () => {
@@ -126,12 +137,18 @@ describe('redact —— 宁可多打码', () => {
     assert.ok(hits.length >= 4, `命中规则种类应 ≥4，实得 ${hits.length}：${JSON.stringify(hits)}`)
   })
 
-  it('本机绝对路径里的用户名被抹掉，结构保留', () => {
+  it('绝对路径：目录链整体打码，文件名保留', () => {
     const { text } = redact(`路径是 ${FAKE_WIN_PATH} 和 ${FAKE_POSIX_PATH}`)
     assert.ok(!text.includes(FAKE_WIN_PATH.split('\\')[2]), 'Windows 路径里的用户名必须被抹掉')
     assert.ok(!text.includes(FAKE_POSIX_PATH.split('/')[2]), 'POSIX 路径里的用户名必须被抹掉')
-    assert.ok(text.includes('C:\\Users\\'), '路径结构应保留（只说"这里有个用户名"）')
-    assert.ok(text.includes('/home/'), '路径结构应保留')
+    // ★ 2.2.10 语义变更（外部测评 #1321 的 F3 建议："absolutePaths: true 时任意绝对路径都打码"）：
+    //   早先只打用户名段、保留目录结构，于是 `<盘符>:\Users\<用户>\Proj\<客户名>\a.md` 里
+    //   项目名/客户名照样留在报告里 —— 打了"是谁的机器"，没打"是谁的项目"。
+    //   现在目录链整体换成占位符，**文件名保留**（报告要能说清"去查哪个文件"）。
+    assert.ok(!text.includes('Documents'), '目录段也要打掉（只打用户名会漏掉项目名/客户名）')
+    assert.ok(!text.includes('C:\\Users\\'), '不再保留目录结构')
+    assert.ok(text.includes('\\x'), 'Windows 路径的文件名要保留')
+    assert.ok(text.includes('/y'), 'POSIX 路径的文件名要保留')
   })
 
   it('超长内容被截断并说明（不假装读全了）', () => {
@@ -142,6 +159,29 @@ describe('redact —— 宁可多打码', () => {
   it('保留无关内容不动', () => {
     const { text } = redact('这是一句普通的中文说明，没有秘密。')
     assert.equal(text, '这是一句普通的中文说明，没有秘密。')
+  })
+
+  it('★ 非家目录的业务数据路径也打码（真实测评里原样漏出的形态）', () => {
+    // 外部测评 #1321（F3）的样本：/srv/clients/acme/payroll.xlsx —— 路径里带客户名。
+    const { text } = redact(`配置在 ${FAKE_BIZ_PATH} 里`)
+    assert.ok(!text.includes('acme'), `业务路径里的客户名必须被抹掉，实得：${JSON.stringify(text)}`)
+    // 2.2.10：兜底规则连路径根一起打掉（`/srv/` 本身也可能带信息），文件名保留。
+    assert.ok(!text.includes('/srv/'), `目录链（含 /srv）一并打掉，实得：${JSON.stringify(text)}`)
+    assert.ok(text.includes('payroll.xlsx'), '文件名应保留 —— 读者要知道去查哪个文件')
+  })
+
+  it('★ URL 不会被当成绝对路径误打码', () => {
+    // 兜底规则靠负向后顾区分"路径"与"URL 里的斜杠"。这条钉住它：
+    // `https://host/a/b` 里 `/a/b` 前面的字符命中排除集，不该被打。
+    const url = ['https://example.com', 'docs', 'guide.md'].join('/')
+    const { text } = redact(`参考 ${url} 一文`)
+    assert.ok(text.includes('example.com'), `URL 主机名不该被打掉，实得：${JSON.stringify(text)}`)
+  })
+
+  it('★ 单级路径不误伤命令文本（兜底要求至少两级）', () => {
+    const { text } = redact('/learn rollback <批次号> 与 </div> 都应原样保留')
+    assert.ok(text.includes('/learn'), `命令文本不该被打码，实得：${JSON.stringify(text)}`)
+    assert.ok(text.includes('</div>'), 'HTML 片段不该被打码')
   })
 })
 

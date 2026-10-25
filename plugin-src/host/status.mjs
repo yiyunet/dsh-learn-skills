@@ -299,8 +299,45 @@ function readWriteShas(value) {
   )
 }
 
-/** 变更日志目录（回滚入口）。 */
+/**
+ * 变更批次 id 的**字符白名单**。
+ *
+ * ★ 为什么是字符白名单，而不是精确格式 `^U\d{8}-[0-9a-f]{4}$`
+ *   （当前生成逻辑确实是那个形状，见 `flows.mjs` 的 `openBatch` 与
+ *   `paths.mjs` 的 `dateStamp()`／`fingerprint()`）：
+ *   安全上两者等价 —— 白名单已经挡掉一切路径分隔符（`/`、`\`）与 `..`；
+ *   但白名单对**格式演化免疫**：将来把指纹从 4 位改成 6 位、或日期换写法时，
+ *   精确正则会**误拒合法批次**（用户的回滚直接失效），白名单不会。
+ * @type {RegExp}
+ */
+export const BATCH_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
+
+/**
+ * 判断一个批次 id 是否可用于拼路径。
+ * @param {unknown} value 待判值
+ * @returns {boolean} 是否合法
+ */
+export function isBatchId(value) {
+  return typeof value === 'string' && BATCH_ID_PATTERN.test(value)
+}
+
+/**
+ * 变更日志路径（回滚入口）。
+ *
+ * ⚠️ **这是一处安全边界**：`batchId` 来自请求（RPC 参数 / 斜杠命令的 args），
+ *   属**不可信输入**。早先这里直接 `${stateRoot}/changes/${batchId}.json`，
+ *   于是 `batchId=../../x` 能读到工作区外的任意 `.json`，并把它当作变更日志执行
+ *   —— 回滚随后按日志里的绝对路径删除／覆盖文件（外部测评 #1321 的 F1，
+ *   交付 D-20261025-001）。**校验必须在这里**，因为它是拼路径的唯一入口。
+ * @param {string} stateRoot 状态目录（绝对路径）
+ * @param {string} batchId 批次 id
+ * @returns {string} 日志文件绝对路径
+ * @throws {Error} 批次 id 不合白名单时（调用方应转成可读的业务错误，而不是让它冒泡）
+ */
 export function journalPath(stateRoot, batchId) {
+  if (!isBatchId(batchId)) {
+    throw new Error(`批次号不合法（只允许字母/数字/下划线/连字符，1-64 位）：${JSON.stringify(batchId)}`)
+  }
   return `${stateRoot}/changes/${batchId}.json`
 }
 

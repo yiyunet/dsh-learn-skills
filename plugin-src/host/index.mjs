@@ -36,7 +36,7 @@ export const name = 'learn-skills'
 export const inject = ['userQuestions', 'commands']
 
 /** 插件版本（status 回显与报告用；与 package.json 一致，由 `verify-package.mjs` 断言）。 */
-const VERSION = '2.2.9'
+const VERSION = '2.2.10'
 
 /** 命令名（斜杠后的名字）。 */
 const COMMAND = 'learn'
@@ -246,9 +246,34 @@ export function apply(ctx, config = {}) {
               'AI学习 —— 四个入口：',
               ...ENTRIES.map((entry, index) => `${index + 1}. ${entry.label} —— ${entry.description}`),
               '',
-              '用法：/learn init ｜ /learn distill ｜ /learn upgrade [批次号] ｜ /learn audit ｜ /learn rollback <批次号>',
+              '附加动作：/learn rollback <批次号> [--dry-run] —— 回滚某个变更批次（不覆盖你此后新增的修改）',
+              '　　　　　加 --dry-run 只列出将要删除/还原的文件（含绝对路径），不做任何改动',
+              '完整用法：/learn init ｜ /learn distill ｜ /learn upgrade [批次号] ｜ /learn audit ｜ /learn rollback <批次号> [--dry-run]',
             ].join('\n'),
           }
+        }
+        // ★ `rollback` **不是**四个入口之一（`ENTRIES` 只有 init/distill/upgrade/audit），
+        //   但帮助文本、README 与「写入完成」卡片都让用户用它 —— 早先这里没有分支，
+        //   于是那条命令**必然**报「未知入口」（外部测评 #1321 的 F2，交付 D-20261025-001）。
+        //   现在补齐：走与 RPC 完全相同的 `flows.rollback`，不产生第二条规则路径。
+        //   ⚠️ 顺序很重要：必须在 `ENTRIES.find` **之前**，否则永远走不到。
+        if (entryName === 'rollback') {
+          // 支持 `/learn rollback <批次号> --dry-run`：破坏性操作必须能"只看不动"。
+          // 返回值里只有 `relative` 看不出到底动哪个文件（外部测评 #1321 的原话）。
+          const tokens = args.split(/\s+/).filter(token => token !== '')
+          const dryRun = tokens.includes('--dry-run') || tokens.includes('--dry')
+          // 用空格 join 而不是空串：批次号白名单不含空格，拼错的多段会被
+          // `isBatchId` 直接拒掉 —— 比"静默拼成一个看似合法的批次号"安全得多。
+          const batchId = tokens.filter(token => !token.startsWith('--')).join(' ').trim()
+          if (batchId === '') {
+            return {
+              kind: 'error',
+              text: '用法：/learn rollback <批次号> [--dry-run]'
+                + '（批次号在「关联升级」写入完成时会给出；--dry-run 只列出将要处理哪些文件，不做任何改动）',
+            }
+          }
+          const result = await flows.rollback({ sessionId, batchId, dryRun })
+          return { kind: result?.ok === false ? 'error' : 'success', text: renderForText(result) }
         }
         const entry = ENTRIES.find(item => item.id === entryName || item.label === entryName)
         if (entry === undefined) {

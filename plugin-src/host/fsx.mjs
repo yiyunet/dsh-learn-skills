@@ -387,7 +387,20 @@ export class ChangeJournal {
     for (const entry of [...this.entries].reverse()) {
       const current = await readText(entry.path)
       const currentSha = current === undefined ? undefined : fingerprint(current)
-      if (entry.afterSha !== null && currentSha !== entry.afterSha) {
+      // ★ `afterSha` 为空 ⇒ 日志没记"写下去之后的指纹"，于是**无法证明**当前内容
+      //   仍是本批次写入的结果。这种情况一律不执行破坏性动作（删除／覆盖），按安全侧跳过。
+      //
+      //   早先这句是 `entry.afterSha !== null && currentSha !== entry.afterSha` ——
+      //   `null` 会把整道保护**短路掉**，伪造一条 `afterSha: null` 的记录即可跳过
+      //   "是否被改过"的比对（外部测评 #1321 的 F1 根因 c，交付 D-20261025-001）。
+      if (entry.afterSha === null || entry.afterSha === undefined) {
+        skipped.push({
+          relative: entry.relative,
+          reason: '日志未记录写后指纹（afterSha 为空），无法确认当前内容归属，按安全侧跳过',
+        })
+        continue
+      }
+      if (currentSha !== entry.afterSha) {
         skipped.push({
           relative: entry.relative,
           reason: currentSha === undefined ? '目标已不存在，跳过' : '写入之后被改动过，不覆盖',

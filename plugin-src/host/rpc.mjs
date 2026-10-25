@@ -205,12 +205,18 @@ export function registerLearnRpc(ctx, deps) {
       })
     },
 
-    /** 回滚某个变更批次。 */
+    /** 回滚某个变更批次。`dryRun: true` 只列计划、不动任何文件。 */
     async rollback(payload = {}) {
       if (typeof payload.batchId !== 'string' || payload.batchId === '') {
         return { ok: false, code: 'bad-request', message: '需要 batchId' }
       }
-      return deps.flows().rollback({ sessionId: payload.sessionId, batchId: payload.batchId })
+      return deps.flows().rollback({
+        sessionId: payload.sessionId,
+        batchId: payload.batchId,
+        // 只认严格的 `true`：这个开关决定"要不要真的删/改文件"，
+        // 任何真值 coercion（`'false'`、`1`、`{}`）都不该放行执行。
+        dryRun: payload.dryRun === true,
+      })
     },
 
     /**

@@ -105,6 +105,7 @@ pnpm add link:<本仓库绝对路径>
 /learn upgrade [批次号]      出变更清单 / 写入
 /learn audit                只读体检
 /learn rollback <批次号>      回滚某个变更批次
+/learn rollback <批次号> --dry-run   只列出将要删除/还原的文件，不做任何改动
 ```
 
 命令与按钮背后是**同一个** `flows` 实现：命令只是另一个入口，不附带第二套规则。
@@ -258,11 +259,15 @@ reports/               体检报告、复盘与变化记录
 ### 回滚
 
 ```
-/learn rollback <批次号>
+/learn rollback <批次号>             执行回滚
+/learn rollback <批次号> --dry-run   只看计划，不动手
 ```
 
 - 新建的节点被删除，更新过的被还原；
 - **写入之后被你改过的文件一律不动**，并列入"跳过"如实上报 —— 回滚不会变成第二次覆盖；
+- 结果里带**每个文件的绝对路径**（只给相对路径看不出到底动的哪个文件）；
+- 若日志里的绝对路径与当前工作区不符（工作区搬过家、或日志被人改过），
+  会记入 `tampered` 并明确提示 —— 但仍按相对路径执行，不会因此卡住你的回滚；
 - 日志在 `.dsh/learn-skills/changes/<批次号>.json`。
 
 ---
@@ -324,7 +329,7 @@ semanticBudgetMs: 60000     # 总预算；用尽即停，剩余候选走基线�
 npm run static         # 免执行静态体检（import/符号/语法/白名单）
 npm run build          # 构建（宿主半侧复制 + 客户端 esbuild 打包 + 装载层自证）
 npm test               # node --test：真实行为测试（真跑文件系统）
-npm run verify         # 10 组发布契约断言
+npm run verify         # 11 组发布契约断言
 npm run check          # ★ 上面四步一次跑完：static → build → test → verify
 npm run inspect        # 产物体检
 ```
@@ -435,7 +440,7 @@ working-directory 服务作为运行时上下文注入，不再是变量。旧�
 
 ### `npm run check` 报"缺少必需文件"或断言失败
 
-先看它**具体报哪一组**。10 组断言每组对应一个真实失败模式，
+先看它**具体报哪一组**。11 组断言每组对应一个真实失败模式，
 `scripts/verify-package.mjs` 里每条都有注释说明"为什么钉这一条"。
 最常见的一类是 **`lib/` 与 `plugin-src/` 不同步** —— 改完源码**没重建**：
 
@@ -477,6 +482,16 @@ dsh plugin --profile web remove @yiyunet/dsh-learn-skills
 
 > 回滚写入而非整个卸载？用 `/learn rollback <批次号>` —— 它**只还原本插件写过的**，
 > 且**写入之后被你改过的文件一律不动**。
+
+---
+
+## 反馈
+
+遇到问题或想要新功能，[提一个 issue](https://github.com/yiyunet/dsh-learn-skills/issues/new/choose)。
+报问题时写上 **DSH 版本**和**插件版本**，修起来最快。
+
+插件把启动诊断写进 `~/.dsh/learn-skills-boot.log`，贴最后几行通常就能定位；
+**贴之前先删掉密钥和隐私信息。**
 
 ---
 

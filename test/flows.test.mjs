@@ -156,7 +156,7 @@ function harness(options = {}) {
     ...options.readStats === undefined ? {} : { readStats: options.readStats },
   })
   return {
-    flows: createFlows({ config, ctx, sessionInfo, version: '2.2.0' }),
+    flows: createFlows({ config, ctx, sessionInfo, version: '2.2.10' }),
     calls,
     /** 本轮桩被问了几次（脚本队列消耗了几条）。 */
     consumed: () => consumed,
@@ -1743,6 +1743,170 @@ describe('预设新架构适配（2.1.0）—— 落点工作区内 / 判据取�
     // 而那个目录一个字都没被动过
     assert.equal(await readFile(join(localPresetRoot, 'ghost', 'cordis.patch.yml'), 'utf8'),
       '# 未安装的 bundle（名册不知道它）\n')
+  })
+})
+
+/**
+ * 回滚安全 —— 变更日志是不可信输入（外部测评 #1321 的 F1，交付 D-20261025-001）。
+ *
+ * 攻击链：变更日志是**工作区里的普通文件**（agent 的文件工具能写、克隆来的仓库也可能
+ * 自带），而回滚以**宿主进程身份**删/改文件（不受 agent 沙箱约束）。
+ * 所以只要日志里的 `path` 被采信，伪造一份日志就能删到工作区外。
+ *
+ * 这里刻意**逐条钉住三个入口**，因为它们是三个独立的缺陷、可以各自回归：
+ *   ① 日志里的绝对 `path` 必须被忽略（改用 `relative` 经 `resolveInside` 重算）；
+ *   ② `batchId` 必须校验（否则 `../` 能读到工作区外的日志）；
+ *   ③ `afterSha` 为空时不得执行破坏性动作（否则"是否被改过"的比对被短路）。
+ */
+describe('回滚安全 —— 变更日志是不可信输入（测评 #1321 的 F1）', () => {
+  /** 造一份"形状正常"的变更日志（内容完全由调用方决定）。 */
+  async function forgeJournal(ws, batchId, entry) {
+    const dir = join(ws, '.dsh/learn-skills/changes')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, `${batchId}.json`), JSON.stringify({
+      version: 1,
+      batchId,
+      createdAt: new Date().toISOString(),
+      entries: [entry],
+    }), 'utf8')
+  }
+
+  it('★ 日志里的绝对 path 被忽略：工作区外的文件不会被删', async () => {
+    const ws = await freshDir(join(root, 'case-rollback-escape'))
+    const outside = await freshDir(join(root, 'outside-target'))
+    const victim = join(outside, 'important-notes.md')
+    await writeFile(victim, 'ORIGINAL', 'utf8')
+
+    // 伪造：`relative` 写成工作区内的样子，`path` 却指向工作区外
+    await forgeJournal(ws, 'U20261020-abcd', {
+      relative: 'knowledge/nodes/a.md',
+      path: victim,
+      action: 'create',
+      beforeSha: null,
+      beforeText: null,
+      afterSha: null,
+    })
+    const { flows } = harness({ workspace: ws, noMessages: true })
+    const result = await flows.rollback({ sessionId: 'session-test', batchId: 'U20261020-abcd' })
+
+    assert.equal(result.ok, true)
+    assert.equal(existsSync(victim), true, '工作区外的文件**必须**还在（测评 #1321 F1 的核心）')
+    assert.equal(await readFile(victim, 'utf8'), 'ORIGINAL', '内容也不许被改写')
+  })
+
+  it('★ 路径越界的日志条目被拒绝执行，并如实上报', async () => {
+    const ws = await freshDir(join(root, 'case-rollback-traversal'))
+    await forgeJournal(ws, 'U20261020-abcd', {
+      relative: '../../outside/x.md',
+      path: '/tmp/x.md',
+      action: 'create',
+      beforeSha: null,
+      beforeText: null,
+      afterSha: null,
+    })
+    const { flows } = harness({ workspace: ws, noMessages: true })
+    const result = await flows.rollback({ sessionId: 'session-test', batchId: 'U20261020-abcd' })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.rejected.length, 1, `越界条目应被单独列出：${JSON.stringify(result)}`)
+    assert.match(result.rejected[0].reason, /不合法|越界/u)
+  })
+
+  it('★ batchId 含 ../ 一律拒绝（不再穿越到工作区外读日志）', async () => {
+    const ws = await freshDir(join(root, 'case-rollback-badbatch'))
+    const outside = await freshDir(join(root, 'outside-journal'))
+    await writeFile(join(outside, 'evil.json'), JSON.stringify({ entries: [] }), 'utf8')
+
+    const { flows } = harness({ workspace: ws, noMessages: true })
+    const result = await flows.rollback({ sessionId: 'session-test', batchId: '../../outside-journal/evil' })
+
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'BAD_BATCH_ID', `必须拒绝越界批次号：${JSON.stringify(result)}`)
+  })
+
+  it('★ afterSha 为空的条目不被执行（无法证明内容归属 ⇒ 安全侧跳过）', async () => {
+    const ws = await freshDir(join(root, 'case-rollback-nullsha'))
+    const target = join(ws, 'knowledge/nodes/a.md')
+    await mkdir(join(ws, 'knowledge/nodes'), { recursive: true })
+    await writeFile(target, 'USER CONTENT', 'utf8')
+
+    await forgeJournal(ws, 'U20261020-abcd', {
+      relative: 'knowledge/nodes/a.md',
+      path: target,
+      action: 'create',
+      beforeSha: null,
+      beforeText: null,
+      // ← 伪造的关键：`afterSha: null` 曾能短路"是否被改过"的比对
+      afterSha: null,
+    })
+    const { flows } = harness({ workspace: ws, noMessages: true })
+    const result = await flows.rollback({ sessionId: 'session-test', batchId: 'U20261020-abcd' })
+
+    assert.equal(result.removed.length, 0, '不得删除')
+    assert.equal(existsSync(target), true, '文件必须还在')
+    assert.ok(result.skipped.some(item => /afterSha|写后指纹/u.test(item.reason)),
+      `应说明为什么跳过：${JSON.stringify(result.skipped)}`)
+  })
+
+  it('★ dryRun 只列计划：一个文件都不动，并给出绝对路径', async () => {
+    const ws = await freshDir(join(root, 'case-rollback-dryrun'))
+    const target = join(ws, 'knowledge/nodes/a.md')
+    await mkdir(join(ws, 'knowledge/nodes'), { recursive: true })
+    await writeFile(target, 'CREATED BY PLUGIN', 'utf8')
+
+    await forgeJournal(ws, 'U20261020-abcd', {
+      relative: 'knowledge/nodes/a.md',
+      path: target,
+      action: 'create',
+      beforeSha: null,
+      beforeText: null,
+      afterSha: fingerprint('CREATED BY PLUGIN'),
+    })
+    const { flows } = harness({ workspace: ws, noMessages: true })
+    const result = await flows.rollback({ sessionId: 'session-test', batchId: 'U20261020-abcd', dryRun: true })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.dryRun, true)
+    // `relative` 看不出"动的是哪个文件"（测评 #1321 原话：返回值与提示只显示 relative）
+    assert.equal(result.entries.length, 1, `计划应列出条目：${JSON.stringify(result)}`)
+    // ⚠️ 必须过 `normalizeSlashes` 再比：插件内部**约定路径一律是 `/` 形式**
+    //   （见 paths.mjs 的 normalizeSlashes、以及 resolveInside 的"反斜杠被归一化"用例）。
+    //   直接拿 `join()` 拼出来的 `target` 比，在 Windows 上是 `C:\…` vs `C:/…`，
+    //   会红得毫无意义 —— 实测栽过一次。这条断言要跨平台成立就得走同一个归一化函数。
+    assert.equal(result.entries[0].path, normalizeSlashes(target),
+      `计划应给出绝对路径：${JSON.stringify(result.entries)}`)
+    // ★ 核心：预演**不许动文件**
+    assert.equal(existsSync(target), true, 'dryRun 不许删文件')
+    assert.equal(await readFile(target, 'utf8'), 'CREATED BY PLUGIN', 'dryRun 不许改内容')
+  })
+
+  it('★ 日志 path 与当前工作区不符 ⇒ 记入 tampered 但照 relative 执行', async () => {
+    // 不一致只有两种可能：日志被人改过，或工作区搬过家/改过名。
+    // 两者都必须让人看见，但**都不能因此拒绝执行** —— 一律拒绝会让搬过目录的用户
+    // 永远回滚不了自己写的东西。所以留证据、不误伤。
+    const ws = await freshDir(join(root, 'case-rollback-moved'))
+    const target = join(ws, 'knowledge/nodes/a.md')
+    await mkdir(join(ws, 'knowledge/nodes'), { recursive: true })
+    await writeFile(target, 'CREATED BY PLUGIN', 'utf8')
+
+    await forgeJournal(ws, 'U20261020-abcd', {
+      relative: 'knowledge/nodes/a.md',
+      // 模拟"工作区搬过家"：日志里的绝对路径已不指向当前工作区
+      path: '/old/location/knowledge/nodes/a.md',
+      action: 'create',
+      beforeSha: null,
+      beforeText: null,
+      afterSha: fingerprint('CREATED BY PLUGIN'),
+    })
+    const { flows } = harness({ workspace: ws, noMessages: true })
+    const result = await flows.rollback({ sessionId: 'session-test', batchId: 'U20261020-abcd' })
+
+    assert.equal(result.ok, true)
+    assert.equal(result.tampered.length, 1, `不一致必须报出来：${JSON.stringify(result)}`)
+    assert.match(result.message, /不符|搬过家|被人动过/u, '提示里要说清这件事')
+    // 不拒绝执行：搬家是正常运维
+    assert.deepEqual(result.removed, ['knowledge/nodes/a.md'], '应照 relative 重算的路径执行')
+    assert.equal(existsSync(target), false)
   })
 })
 

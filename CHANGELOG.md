@@ -2,6 +2,110 @@
 
 遵循语义化版本。本文件记录**对使用者有影响**的变化。
 
+## 2.2.10 — 安全修复：回滚越界写 / rollback 命令不可达 / 脱敏漏项
+
+**性质：安全修复（P1×2、P2×1）。起因＝外部安全测评**
+（`dsh-bounty#1321`，被测 2.2.9，裁决 hard / B / 6；三条发现已转为本仓 issue #1/#2/#3）。
+
+### 修复
+
+1. **F1 [P1] 回滚不再信任变更日志里的绝对路径**
+   - 早先链路：`status.mjs` 的 `journalPath()` 直接拼 `${stateRoot}/changes/${batchId}.json`
+     （`batchId` 无校验）→ `flows.mjs` 把日志条目的 `path` **原样**交给 `fsx.mjs` 的
+     `rm(entry.path)` / `writeFileAtomic(entry.path, …)`。
+     而变更日志是工作区里的普通文件（agent 的文件工具能写、克隆来的仓库也可能自带），
+     回滚又以**宿主进程身份**执行（不受 agent 沙箱约束）⇒ **伪造一份日志即可删/改工作区外文件**。
+   - 现在：① `batchId` 按字符白名单 `[A-Za-z0-9_-]{1,64}` 校验；
+     ② 回滚时**忽略**日志里的 `path`，一律用 `resolveInside(workspace, relative)` 重算；
+     ③ 越界条目**拒绝执行**并单独列入 `rejected`，不静默丢弃。
+2. **F2 [P1] `/learn rollback <批次号>` 现在真的可用**
+   - 帮助文本、README 与「写入完成」卡片一直让用户用它，但命令路由只在四个入口里查找
+     ⇒ 必然报「未知入口」。现已补上分支，走与 RPC **完全相同**的 `flows.rollback`。
+3. **F3 [P2] 脱敏表按当前凭据形态全面补齐**
+   - 新增：GCP `AIza`、GitHub fine-grained `github_pat_`（并覆盖 `ghu_/ghs_/ghr_`）、
+     GitLab `glpat-`、AWS 临时 `ASIA`、阿里云 `LTAI`、Anthropic `sk-ant-`、
+     Stripe `sk_/rk_ × live/test`、Shopify `shpat_/shpca_/shppa_/shpss_`、
+     Slack / Discord / 飞书 / 钉钉 webhook、Telegram Bot token、身份证号、带分隔符的银行卡号。
+   - 路径：非家目录业务数据根（`/srv`、`/data`、`/mnt`、`/media`、`/private`、`/var/lib`）
+     下的整条路径链打码（测评样本 `/srv/clients/acme/payroll.xlsx` 曾原样漏出）；
+     刻意**不含 `/opt`** —— macOS(Apple Silicon) 的 `/opt/homebrew` 太常见，
+     把它打掉会让大量正常系统路径变成马赛克，收益不值。
+   - 凭证键名表扩充：`access_key`、`refresh_token`、`id_token`、`session_token`、
+     `app_secret`、`app_key`。
+   - 令牌**尾部边界**改写：`\b` → `(?![A-Za-z0-9_-])`。`\b` 依赖"word 字符 / 非 word 字符"
+     的交替，而令牌以 `-` 或 `_` 结尾时，它后面的空格同样是非 word 字符 —— 两者之间
+     根本不存在 boundary，匹配直接失败。一条合法的 39 字符 GCP key（`AIza` + 35 位
+     base64url，末位恰好 `-`）就是这样原样漏出的。受影响：GCP `AIza`、`github_pat_`、
+     `glpat-`、`sk-` / `sk-ant-`、`xox[baprs]-`、JWT 三段。纯字母数字的定长令牌
+     （`AKIA`/`ASIA`/`LTAI`）保留 `\b` —— 那种场合的 `-` 是正常分隔符，收紧反而漏报。
+   - `REDACTION_NOTICE` 同步重写 —— 报告里的声明必须与实际规则**一致**，否则声明本身也在误导。
+
+### 第二轮：按 issue「根因与建议」补齐的两处
+
+首轮只做到"现象级修复"；三条 issue 的「建议」里有两项强化当时按我自己的判断收了范围，
+现按测评建议补齐（对应本仓 issue #1 / #3）：
+
+4. **回滚比对日志 `path` 与重算结果**
+   - 早先完全不看 `path`：攻击虽被挡住，但"这份日志被人动过"**无声无息**。
+   - 现在重算后与 `path` 比对，不一致记入 `tampered`，并在提示里明说
+     「日志路径与当前工作区不符 —— 可能被改过，也可能工作区搬过家／改过名」。
+   - **不因不一致而拒绝执行**：搬家是正常运维，一律拒绝会让搬过目录的用户
+     永远回滚不了自己写的东西。留证据、不误伤。
+5. **回滚能"只看不动"，且看得见绝对路径**
+   - 返回值新增 `entries`（每项的绝对路径与动作）；新增 `dryRun`
+     （命令 `/learn rollback <批次号> --dry-run`，RPC `dryRun: true`），
+     只列计划、**一个文件都不动**。
+   - 原因：破坏性操作的返回值早先只有 `relative`，看不出到底动的是哪个文件。
+6. **`absolutePaths` 为真时，任意绝对路径都打码**
+   - 早先只打"家目录用户名段 + 几个已知业务根"，于是
+     `<盘符>:\Users\<用户>\Proj\<客户名>\a.md` 只掉用户名，**项目名／客户名照样留在报告里**。
+   - 现在目录链整体换成占位符、**文件名保留**（报告要能说清"去查哪个文件"）。
+   - 单级路径（如 `/etc/passwd`）刻意不打 —— 它不含用户名/客户名，
+     泄漏价值低于"把命令文本打成马赛克"的代价。
+   - 顺带补上 企业微信 `qyapi.weixin.qq.com/cgi-bin/webhook/send?key=` 与
+     Teams `*.webhook.office.com/webhookb2/` 两类 webhook（测评没点名，自查补的）。
+
+### ⚠️ 行为变化（两项，均为安全侧）
+
+`afterSha` 为空的日志条目**不再执行**删除/覆盖。早先那句
+`if (entry.afterSha !== null && currentSha !== entry.afterSha)` 会让 `null`
+**短路**整道保护 —— 伪造一条 `afterSha: null` 就能跳过"内容是否仍为本批次写入结果"的比对。
+现在无法证明归属时一律 `skipped` 并说明原因：**宁可不回滚，不越界删改**。
+代价：极老的日志（未记录写后指纹的那些）回滚时会跳过，需人工处理。
+
+**第二项：体检报告里的绝对路径会变短。** 目录链整体成为占位符，只保留文件名
+（`/srv/clients/acme/payroll.xlsx` → `/«已脱敏»/payroll.xlsx`）。
+这是"任意绝对路径都打码"的必然结果 —— 若你需要在报告里看出目录层级，
+请把 `absolutePaths` 关掉（`redact(text, { absolutePaths: false })`）。
+
+### 测试（新增 18 条）
+
+- `test/flows.test.mjs` 新增「回滚安全 —— 变更日志是不可信输入」**6 条**：
+  伪造 `path` 不删工作区外文件｜越界 `relative` 被拒绝并上报｜`batchId` 含 `../` 返回
+  `BAD_BATCH_ID`｜`afterSha: null` 条目不执行｜**`dryRun` 一个文件都不动且给出绝对路径**｜
+  **`path` 与工作区不符时记入 `tampered` 但照 `relative` 执行**。
+- `test/command-router.test.mjs` **新增文件** 4 条：用真实 `apply(ctx)` ＋ 桩 `commands`
+  把 `/learn` 当命令测。此前测试**全部直接调 `flows.*`**，这正是 F2 长期漏网的原因。
+- `test/audit.test.mjs` 新增 **8 条**脱敏靶子：GCP / GitHub PAT / Slack webhook / 身份证 /
+  `/srv` 业务路径 / **`sk-` 以连字符结尾（令牌尾部边界）** / **URL 不被当成路径误打** /
+  **单级路径不误伤命令文本**。夹具按既有规范**运行时拼装**，避免泄漏扫描举报测试自己。
+
+### 反馈入口（新增）
+
+- `.github/ISSUE_TEMPLATE/` 三份模板：**报告问题**（必填"发生了什么 / 版本 / 系统"，
+  可选的"哪个入口"下拉与日志区）、**提需求**（必填"想要什么"）、
+  以及 `config.yml`（保留空白 issue，并在模板选择器里给出 README / CHANGELOG 两条指路）。
+- README（中英）新增「反馈」小节：一句话说清"提 issue + 带上 DSH 版本和插件版本"。
+- `verify` 新增第 ⑪ 组断言：**模板必须把版本号设为必填**、README 必须指向
+  `issues/new/choose`、空白 issue 不得关闭。
+  理由：README 里那句话会随文档改写漂移，模板不会 —— 缺它，反馈里就没有版本号，
+  排障只能从猜开始。
+
+### 已知边界
+
+测评方的复现环境**仅 Linux**（Debian 13 / aarch64）；Windows 与 macOS 未验。
+本仓在 Windows 上跑全量测试后再发布。
+
 ## 2.2.9 — 公开前脱敏清扫
 
 **性质：只改措辞与发布前断言，不改任何行为。**

@@ -293,7 +293,7 @@ this switch explicitly.
 npm run static         # static check, no execution (imports/symbols/syntax/allow-list)
 npm run build          # host half copy + client esbuild bundle + loader self-proof
 npm test               # node --test: real behaviour tests (real filesystem)
-npm run verify         # 10 release-contract assertion groups
+npm run verify         # 11 release-contract assertion groups
 npm run check          # ★ all four in one: static → build → test → verify
 npm run inspect        # artifact inspection
 ```
@@ -468,6 +468,16 @@ other tool.
 
 > Want to roll back a write rather than uninstall? Use `/learn rollback <batch id>` — it reverts
 > **only what this plugin wrote**, and **never touches files you edited afterwards**.
+
+---
+
+## Feedback
+
+Found a problem or want a new feature? [Open an issue](https://github.com/yiyunet/dsh-learn-skills/issues/new/choose).
+Include the **DSH version** and the **plugin version** — that makes a fix much faster.
+
+The plugin writes startup diagnostics to `~/.dsh/learn-skills-boot.log`; the last few lines
+usually pin it down. **Remove keys and private info before pasting.**
 
 ---
 

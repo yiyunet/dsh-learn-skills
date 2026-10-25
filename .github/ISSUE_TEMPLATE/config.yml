@@ -1,0 +1,13 @@
+# 新 issue 的入口页：两条「你可能先想看一眼」的指路 ＋ 允许开空白 issue。
+#
+# 为什么留 `blank_issues_enabled: true`：模板是**帮忙**，不是门槛。
+# 强制所有反馈都填表，只会把「用法问一句」的人挡在门外，或者逼他硬填一个 bug 模板。
+blank_issues_enabled: true
+
+contact_links:
+  - name: 安装 / 用法问题，先看 README
+    url: https://github.com/yiyunet/dsh-learn-skills#readme
+    about: 四个入口怎么用、写门禁怎么配、预设装在哪、怎么彻底卸载 —— README 里都有 / Install, usage, write gate, preset location and clean uninstall
+  - name: 升级后行为变了，先看 CHANGELOG
+    url: https://github.com/yiyunet/dsh-learn-skills/blob/main/CHANGELOG.md
+    about: 每个版本的修复，以及**会被你感知到**的行为变化，都写在这里 / Every fix, plus behaviour changes you can actually notice

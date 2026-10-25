@@ -22,14 +22,14 @@ import {
 } from './knowledge.mjs'
 import {
   baseOf, candidateId, dateStamp, fingerprint, isoDate, isoTimestamp, nextNodeId,
-  presetIdFromName, validatePresetName,
+  presetIdFromName, resolveInside, validatePresetName,
 } from './paths.mjs'
 import {
   BACK_SENTINEL, CANCEL_SENTINEL, DEFAULT_PRESET_DIR, FIXED_QUESTION_IDS, SKIP_OPTION, TOTAL_ROUNDS,
   createPreset, discoverPresetNames, draftQuestion, draftQuestions, extractTopicMap, installInstructions,
   parseThreePart, renderPresetBody, renderPreview, scaffoldWorkspace, validateAnswers,
 } from './preset.mjs'
-import { BatchesStore, BaselineStore, KnownStore, SessionStore, openJournal } from './status.mjs'
+import { BatchesStore, BaselineStore, KnownStore, SessionStore, isBatchId, journalPath, openJournal } from './status.mjs'
 import { MIN_ROUNDS, generateSemanticSuggestions, generateThemeMap } from './model.mjs'
 import { redact } from './redact.mjs'
 import { batchChoice, distillEmptyReason, distillOverview, plainText } from './ui-text.mjs'
@@ -2467,20 +2467,104 @@ export function createFlows(options) {
     if (!writeEnabled) {
       return { ok: false, code: 'WRITE_DISABLED', message: '写门禁关闭，未执行回滚。' }
     }
+    // ★ 批次号是**不可信输入**（RPC 参数 / 斜杠命令的 args）：先按字符白名单校验，
+    //   再交给 `journalPath` 拼路径。见交付 D-20261025-001（外部测评 #1321 的 F1）。
+    if (!isBatchId(request.batchId)) {
+      return {
+        ok: false,
+        code: 'BAD_BATCH_ID',
+        message: `批次号不合法（只允许字母、数字、下划线、连字符，1-64 位）：${JSON.stringify(request.batchId)}`,
+      }
+    }
     const stateDir = `${target.workspace}/${directories.stateDir}`
     const journal = await openJournal(stateDir, request.batchId)
-    const record = await readJson(`${stateDir}/changes/${request.batchId}.json`)
+    const record = await readJson(journalPath(stateDir, request.batchId))
     if (record === undefined) {
       return { ok: false, code: 'UNKNOWN_BATCH', message: `找不到变更批次 ${request.batchId} 的日志。` }
     }
-    journal.entries = (record.entries ?? []).map(entry => ({
-      relative: entry.relative,
-      path: entry.path,
-      action: entry.action,
-      beforeSha: entry.beforeSha,
-      beforeText: entry.beforeText,
-      afterSha: entry.afterSha,
-    }))
+    // ★★ 路径**一律重算，绝不信日志里的 `path`**。
+    //
+    //   变更日志是工作区里的普通文件：agent 的文件工具能写它，克隆来的仓库也可能自带
+    //   一份。所以它是**不可信输入** —— 而回滚正是以**宿主进程身份**删/改文件的最后
+    //   一步（`index.mjs` 注释：宿主进程身份、不受 agent 沙箱约束）。
+    //   早先这里原样采用 `entry.path`，于是伪造一份日志就能让回滚删到工作区外
+    //   （测评 #1321 的 F1）。现在只用日志里的 `relative`，经 `resolveInside` 重算：
+    //   `..` 越界会被它直接抛错 ⇒ 该条目**拒绝执行**并如实上报，不静默丢弃。
+    const planned = []
+    const rejected = []
+    const tampered = []
+    for (const entry of record.entries ?? []) {
+      const relative = typeof entry?.relative === 'string' ? entry.relative : ''
+      // ⚠️ 空 `relative` 必须在这里挡掉：`resolveInside(ws, '')` 返回的是**工作区根本身**，
+      //   放行的话回滚会对根目录动手。这是改用 `relative` 重算路径后新增的边角，
+      //   与"忽略 path"是同一处改动的另一面，必须一起防。
+      if (relative.trim() === '') {
+        rejected.push({ relative, reason: '日志条目缺少 relative，已拒绝执行（空相对路径会指向工作区根）' })
+        continue
+      }
+      let resolved
+      try {
+        resolved = resolveInside(target.workspace, relative)
+      } catch (error) {
+        rejected.push({
+          relative,
+          reason: `日志条目路径不合法，已拒绝执行：${String(error?.message ?? error)}`,
+        })
+        continue
+      }
+      // ★ 一致性校验：日志里记的绝对 `path` 与**按当前工作区重算**的结果不一致时，
+      //   只有两种可能 ——（a）日志被人改过；（b）工作区被搬家或改名。
+      //
+      //   两种都必须让人看见：早先完全不看 `path`，攻击虽被挡住，但"这份日志被
+      //   动过"这件事**无声无息**（外部测评 #1321 的 F1 建议：重算后要求与 `path` 一致）。
+      //
+      //   但**不能因此拒绝执行**：（b）是正常运维，一律拒绝会让搬过目录的用户
+      //   永远回滚不了自己写的东西。所以记入 `tampered`、照 `relative` 执行，
+      //   并在 `message` 里明确说出来 —— 留证据，不误伤。见交付 D-20261025-002。
+      if (typeof entry?.path === 'string' && entry.path !== '' && entry.path !== resolved) {
+        tampered.push({ relative, loggedPath: entry.path, resolvedPath: resolved })
+      }
+      planned.push({
+        relative,
+        path: resolved,
+        action: entry.action,
+        beforeSha: entry.beforeSha,
+        beforeText: entry.beforeText,
+        afterSha: entry.afterSha,
+      })
+    }
+    // ★ 回滚是破坏性操作，而返回值早先**只给 `relative`** —— 用户看不出到底动的是
+    //   哪个文件（测评 #1321 原话）。计划里的绝对路径一并带回；`dryRun: true` 时
+    //   只列计划、一个文件都不动。
+    const plan = planned.map(item => ({ relative: item.relative, path: item.path, action: item.action }))
+    const tamperedNote = tampered.length === 0
+      ? ''
+      : `\n⚠️ 有 ${tampered.length} 条日志记录的绝对路径与当前工作区不符`
+        + `（可能日志被改过，也可能工作区搬过家／改过名）—— 已按 relative 重算后处理：`
+        + `${tampered.map(item => item.relative).join('、')}。`
+        + '若你没搬过工作区，请把这条日志当成**被人动过**来查。'
+    if (request.dryRun === true) {
+      const willRemove = plan.filter(item => item.action === 'create').length
+      const willRestore = plan.length - willRemove
+      const noSha = planned.filter(item => item.afterSha === null || item.afterSha === undefined).length
+      return {
+        ok: true,
+        dryRun: true,
+        batchId: request.batchId,
+        entries: plan,
+        tampered,
+        rejected,
+        skipped: [...rejected],
+        message: `回滚预演（**未执行任何改动**）：本批次共 ${plan.length} 项`
+          + `（将删除 ${willRemove} 项、将还原 ${willRestore} 项`
+          + (rejected.length === 0 ? '' : `、路径不合法已排除 ${rejected.length} 项`)
+          + '）。'
+          + (noSha === 0 ? '' : `其中 ${noSha} 项日志未记写后指纹，真正执行时会被跳过。`)
+          + '确认无误后去掉 dryRun 再执行。'
+          + tamperedNote,
+      }
+    }
+    journal.entries = planned
     const result = await journal.rollback()
     // ★ 撤销这些文件的写基线：回滚把内容还原成"本插件从未写过"的状态，
     //   还留着基线的话，下一次升级会拿一个对不上的指纹判冲突 ——
@@ -2497,13 +2581,25 @@ export function createFlows(options) {
     if (baselinePaths.length > 0) {
       await storesFor(target.workspace).known.forget({ paths: baselinePaths })
     }
+    // 被拒的条目与"跳过"合并上报：两者都是"没动这个文件"，但原因不同，
+    // 用户需要看得到**为什么**（尤其是"路径不合法"这条，它是被人动过的信号）。
+    const skippedAll = [
+      ...rejected.map(item => ({ relative: item.relative, reason: item.reason })),
+      ...result.skipped,
+    ]
     return {
       ok: true,
       batchId: request.batchId,
       restored: result.restored,
       removed: result.removed,
-      skipped: result.skipped,
-      message: `回滚完成：还原 ${result.restored.length} 项、删除 ${result.removed.length} 项、跳过 ${result.skipped.length} 项（跳过的项在你写入之后被改动过，本插件不覆盖）。`,
+      skipped: skippedAll,
+      rejected,
+      tampered,
+      entries: plan,
+      message: `回滚完成：还原 ${result.restored.length} 项、删除 ${result.removed.length} 项、跳过 ${skippedAll.length} 项。`
+        + '跳过＝（a）该文件在你写入之后被改动过、（b）日志未记录写后指纹（afterSha 为空，无法确认归属）、'
+        + '（c）日志条目路径不合法（越界）—— 三种情况本插件一律**不覆盖、不执行**。'
+        + tamperedNote,
     }
   }
 

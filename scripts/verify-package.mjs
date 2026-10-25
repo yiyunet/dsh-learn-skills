@@ -16,6 +16,8 @@
  *   ⑨ 宿主 inject 声明只引用 base bundle 里真实存在的服务
  *      —— 把可选能力写进 inject 会让插件在缺该能力的部署里**整体 inactive**
  *   ⑩ 客户端产物必须带"提交在 wrapper factory 内部"的装配证据
+ *   ⑪ 反馈入口契约：issue 模板必须把"版本号"设为必填，README 必须指向模板选择器
+ *      —— README 的一句话会随文档漂移，模板是不会骗人的硬约束
  *
  *   附 ⑥-b（2.1.0 增；2026-09 修订）：**预设新架构的两条硬纪律**——
  *   宿主半侧的 `installBundle(...)` 只允许出现在**人工触发区**（`installPreset`，锚点标记
@@ -553,6 +555,44 @@ check(clientBundle.includes('__ModuleLoader__'), 'lib/client.js 没有 __ModuleL
     + '产物落在工厂外面：顶层执行会抛错，整个 /plugins 拼接 bundle 会全灭')
 }
 
+// ── ⑪ 反馈入口契约：issue 模板必须问版本号，README 必须指向模板选择器 ──────
+//
+// 为什么这条要在 verify 里：README 里"报问题时写上 DSH 版本和插件版本"只是**一句话**，
+// 会随文档改写漂移；而"用户报的问题里到底有没有版本号"直接决定修起来多快。
+// 把它钉成硬约束 —— 谁改 README 时删掉反馈入口、或改模板时把版本号挪出必填，
+// 这里就会红，而不是等第一个反馈进来才发现要来回问三轮。
+{
+  const bugForm = await readIfExists('.github/ISSUE_TEMPLATE/bug.yml')
+  const formConfig = await readIfExists('.github/ISSUE_TEMPLATE/config.yml')
+  check(bugForm !== undefined,
+    '.github/ISSUE_TEMPLATE/bug.yml 不存在 —— 新 issue 会退化成空白模板，报问题的人不知道该填什么')
+  check(formConfig !== undefined,
+    '.github/ISSUE_TEMPLATE/config.yml 不存在 —— 模板选择器缺少"先看 README / CHANGELOG"的指路')
+  if (bugForm !== undefined) {
+    const versionAt = bugForm.search(/id:\s*versions/u)
+    check(versionAt >= 0,
+      'bug.yml 缺少 versions 字段 —— 反馈里拿不到 DSH / 插件版本，排障只能从猜开始')
+    if (versionAt >= 0) {
+      // 截到"下一个字段"为止再判断必填：整串 includes('required: true') 会被
+      // 别的字段的 required 误导（实测这类"全文找关键字"的断言会给出假绿）。
+      const rest = bugForm.slice(versionAt)
+      const nextField = rest.search(/\n\s*-\s+type:/u)
+      const block = nextField === -1 ? rest : rest.slice(0, nextField)
+      check(/required:\s*true/u.test(block),
+        'bug.yml 的 versions 字段不是必填 —— 模板存在的意义就是让人一定写上传本号')
+    }
+  }
+  if (formConfig !== undefined) {
+    check(/blank_issues_enabled:\s*true/u.test(formConfig),
+      'config.yml 关掉了空白 issue —— 模板是帮忙不是门槛，"就问一句"的人不该被挡在门外')
+  }
+  for (const readmeName of ['README.md', 'README.en.md']) {
+    const text = await readIfExists(readmeName) ?? ''
+    check(text.includes('issues/new/choose'),
+      `${readmeName} 里没有指向 issues/new/choose 的反馈入口 —— 用户会去开空白 issue 或干脆不提`)
+  }
+}
+
 // ── 输出 ──────────────────────────────────────────────────────────────────
 console.log('')
 if (warnings.length > 0) {
@@ -565,4 +605,4 @@ if (failures.length > 0) {
   for (const item of failures) console.error(`  · ${item}`)
   process.exit(1)
 }
-console.log('✓ 契约校验通过（10 组断言全部为真）')
+console.log('✓ 契约校验通过（11 组断言全部为真）')

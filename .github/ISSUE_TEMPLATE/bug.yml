@@ -1,0 +1,59 @@
+name: 报告问题 / Bug report
+description: 插件出错、不工作，或者和说明不一致 / Something is broken or not working as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 谢谢反馈！中文、英文都行。/ Thanks for the report! Chinese or English is fine.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么 / What happened
+      description: 你做了什么、看到了什么、本来应该怎样 / What you did, what you saw, what you expected
+    validations:
+      required: true
+
+  # 我们的四个入口 + 回滚 + 安装，各自是独立的代码路径 —— 先知道落在哪一段，
+  # 定位就不用从「整个插件」开始。可留空：不确定的人不该被迫猜。
+  - type: dropdown
+    id: where
+    attributes:
+      label: 哪个入口 / Which part
+      description: 不确定就留空 / Leave blank if unsure
+      multiple: false
+      options:
+        - /learn init（初始预设）
+        - /learn distill（收集提炼）
+        - /learn upgrade（关联升级 / 写入）
+        - /learn audit（体检）
+        - /learn rollback（回滚）
+        - 预设安装与卸载 / preset install & uninstall
+        - 不算某一项（整体、文档、其他）/ other
+
+  - type: input
+    id: versions
+    attributes:
+      label: 版本 / Versions
+      description: DSH 版本和插件版本，DSH 侧栏的插件页能看到 / DSH and plugin versions, shown on the DSH Plugins page
+      placeholder: DSH 0.2.1-rc.1, plugin 2.2.10
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 系统 / OS
+      placeholder: Windows 11
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 截图、日志或诊断行 / Screenshots, logs, or diagnostic lines
+      description: |
+        可选。插件把启动诊断写进 `~/.dsh/learn-skills-boot.log`，贴最后几行通常就够。
+        **贴之前先删掉密钥和隐私信息。**
+        / Optional. The plugin writes startup diagnostics to `~/.dsh/learn-skills-boot.log`;
+        the last few lines are usually enough. **Remove keys and private info first.**
