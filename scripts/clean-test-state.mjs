@@ -13,7 +13,7 @@
  * ── 本插件留痕的判定（判据都在文件里，不看目录名）────────────────────────
  *   ① 预设本体：`<workspace>/.dsh/preset-bundles/<id>/`（2.1.0 起；旧版在
  *      `<dshHome>/preset-bundles/`），且 `cordis.patch.yml` 含生成标记
- *      「由 @yiyunet/dsh-learn-skills 生成」⇒ 手工预设（如 `alpha`）永不被误删
+ *      「由 dsh-learn-skills 生成」⇒ 手工预设（如 `alpha`）永不被误删
  *   ② 工作区状态：`<workspace>/.dsh/learn-skills/`（会话断点／批次账／体检基线／
  *      变更日志／known 记录）
  *
@@ -44,7 +44,7 @@ import { pathToFileURL } from 'node:url'
  * 生成标记：预设的 patch 里出现它，才算本插件的生成物。
  * 新式 bundle 看 `cordis.patch.yml`，旧式目录回退看 `agent.cordis.yml`。
  */
-export const GENERATED_MARKER = '@yiyunet/dsh-learn-skills'
+export const GENERATED_MARKER = 'dsh-learn-skills'
 
 /**
  * 默认预设根：**随工作区走**（2.1.0 起与 `plugin-src/host/flows.mjs` 的

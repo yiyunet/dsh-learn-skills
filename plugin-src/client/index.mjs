@@ -26,7 +26,7 @@
  * 平台冻结模块表只提供 react / react-dom / react/jsx-runtime / react-dom/client。
  */
 window.__ModuleLoader__.load({
-  id: '@yiyunet/dsh-learn-skills',
+  id: 'dsh-learn-skills',
   factory: (require) => {
     const module = { exports: {} }
     const exports = module.exports

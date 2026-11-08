@@ -50,7 +50,7 @@ if (client === undefined) {
   console.error('✗ 缺少 lib/client.js —— 客户端半侧不会被装载。')
 } else {
   const markers = [
-    ['装载器 id', '@yiyunet/dsh-learn-skills'],
+    ['装载器 id', 'dsh-learn-skills'],
     ['槽位契约', 'conversation.input.left'],
     ['菜单标题', 'AI学习'],
     ['RPC 端点名', 'dsh-learn-skills'],

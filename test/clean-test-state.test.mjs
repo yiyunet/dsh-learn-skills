@@ -43,7 +43,7 @@ async function makePreset(presetRoot, id, { generated }) {
   }, null, 2), 'utf8')
   await writeFile(
     join(dir, 'cordis.patch.yml'),
-    `${generated ? `# 「${id}」的学习 Agent 预设 —— 由 @yiyunet/dsh-learn-skills 生成。\n` : '# 手工预设（无插件生成标记）\n'}`
+    `${generated ? `# 「${id}」的学习 Agent 预设 —— 由 dsh-learn-skills 生成。\n` : '# 手工预设（无插件生成标记）\n'}`
       + '- insert:\n'
       + `    - id: preset-${id}\n`
       + "      name: '@deepseek-ai/dsh-agent-preset'\n"

@@ -286,8 +286,8 @@ async function buildClient() {
     throw new Error(`lib/client.js 顶层执行抛错：${error?.name}: ${error?.message}\n`
       + '  → 最常见原因：esbuild 产物没有插进 wrapper 的 factory 内部。')
   }
-  if (!registrations.some(item => item?.id === '@yiyunet/dsh-learn-skills')) {
-    throw new Error('lib/client.js 执行后没有注册 @yiyunet/dsh-learn-skills —— 装载器契约被破坏')
+  if (!registrations.some(item => item?.id === 'dsh-learn-skills')) {
+    throw new Error('lib/client.js 执行后没有注册 dsh-learn-skills —— 装载器契约被破坏')
   }
 
   const requireCalls = []

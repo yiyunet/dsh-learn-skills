@@ -1,4 +1,4 @@
-# @yiyunet/dsh-learn-skills —— profile 组合层
+# dsh-learn-skills —— profile 组合层
 #
 # 本插件在**宿主平面**注册：
 #   · 斜杠命令 /learn（ctx.commands）——与按钮走同一套流程
@@ -10,7 +10,7 @@
 # 因此不需要在 agent preset 里加行（见 README「安装与装载」）。
 - insert:
     - id: learn-skills
-      name: '@yiyunet/dsh-learn-skills'
+      name: 'dsh-learn-skills'
       config:
         # ── 默认作用范围 ────────────────────────────────────────────────────
         # 未显式给出工作区时，用当前会话绑定的工作区。设了这个值则**强制**用它，

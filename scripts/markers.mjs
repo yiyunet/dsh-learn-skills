@@ -20,7 +20,7 @@ export const ENTRY_LABELS = ['初始预设', '收集提炼', '关联升级', '�
 /** 提交前必须断言的标记（每条都对应一个真实失败模式）。 */
 export const REQUIRED_MARKERS = [
   { label: 'esbuild 全局名', needle: CLIENT_GLOBAL },
-  { label: '装载器 id', needle: '@yiyunet/dsh-learn-skills' },
+  { label: '装载器 id', needle: 'dsh-learn-skills' },
   { label: '槽位契约', needle: 'conversation.input.left' },
   { label: '菜单标题', needle: 'AI学习' },
   { label: 'RPC 端点名', needle: 'dsh-learn-skills' },

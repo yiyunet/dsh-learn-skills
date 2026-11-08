@@ -29,7 +29,7 @@
  *      发布包里已经带 `lib/`，不需要也不应该在消费者机器上跑打包器。
  *   ③ **只提示不代劳**：缺 esbuild 时只告诉用户跑什么，不偷偷 npm install 别的东西。
  *
- * 📌 文件名 `postinstall.mjs` 沿用生态基准件（`@yiyunet/dsh-dingtalk-connector`）的命名 ——
+ * 📌 文件名 `postinstall.mjs` 沿用生态基准件（`dsh-dingtalk-connector`）的命名 ——
  *    它现在由 `prepare` 调用，不是 `postinstall` 钩子。
  *
  * @module dsh-learn-skills/prepare

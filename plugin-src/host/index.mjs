@@ -13,7 +13,7 @@
  *
  * 发布产物由 `npm run build` 生成到 lib/；本文件不直接对外。
  *
- * @module @yiyunet/dsh-learn-skills
+ * @module dsh-learn-skills
  */
 
 import { createFlows, ENTRIES } from './flows.mjs'
@@ -229,7 +229,7 @@ export function apply(ctx, config = {}) {
 
   // ── 入口 ①：斜杠命令 /learn ────────────────────────────────────────────
   const disposeCommand = ctx.commands.register({
-    definitionId: '@yiyunet/dsh-learn-skills',
+    definitionId: 'dsh-learn-skills',
     name: COMMAND,
     description: 'AI学习：初始预设 / 收集提炼 / 关联升级 / 沉淀复用',
     input: { hint: '<入口> [参数]', attachments: false },

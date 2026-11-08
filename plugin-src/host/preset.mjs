@@ -1011,7 +1011,7 @@ export function renderWorkspaceAgents(answers, dirs) {
     `# ${name} · 学习工作区`,
     '',
     '> 本文件是**稳定、精炼**的工作区原则与知识入口；会变的内容不进这里。',
-    '> 由 `@yiyunet/dsh-learn-skills` 初始化。若本文件已存在，插件不会覆盖它。',
+    '> 由 `dsh-learn-skills` 初始化。若本文件已存在，插件不会覆盖它。',
     '',
     '## 知识入口（先读这里）',
     `- \`knowledge/framework.md\` —— 知识体系**唯一总索引**。新增/修改节点须同步更新它。`,
@@ -1052,7 +1052,7 @@ export function renderFramework(answers, topicMap = null) {
     `# ${name} 的知识框架`,
     '',
     '> 本文件是知识体系的**唯一总索引**。节点增删改后必须回到这里更新。',
-    '> 由 `@yiyunet/dsh-learn-skills` 初始化；既有内容不会被覆盖。',
+    '> 由 `dsh-learn-skills` 初始化；既有内容不会被覆盖。',
     '',
     '## 使用方式',
     '1. 先读本索引，判断该查哪个方向。',
@@ -1204,7 +1204,7 @@ export function renderPresetBundleManifest(presetId) {
     version: '1.0.0',
     private: true,
     type: 'module',
-    description: `AI学习预设「${presetId}」—— 由 @yiyunet/dsh-learn-skills 生成`,
+    description: `AI学习预设「${presetId}」—— 由 dsh-learn-skills 生成`,
     dsh: { bundle: { patch: './cordis.patch.yml' } },
   }, null, 2)}\n`
 }
@@ -1234,7 +1234,7 @@ export function renderPresetPatch(options) {
     .join('\n')
   const description = `${answers.values.vocation ?? '个人学习'} 的学习助手（${isoDate()} 创建）`
   return [
-    `# 「${displayName}」的学习 Agent 预设 —— 由 @yiyunet/dsh-learn-skills 生成。`,
+    `# 「${displayName}」的学习 Agent 预设 —— 由 dsh-learn-skills 生成。`,
     '#',
     '# 本文件是 bundle patch：安装本 bundle 后，下面这行声明注册进',
     '# @deepseek-ai/dsh-agent-preset-registry 的 roster，预设随即出现在新建会话的选择器里。',
@@ -1355,7 +1355,7 @@ export function renderAgentComposition(answers) {
   const persona = renderPresetBody(answers)
   const indent = value => value.split('\n').map(line => `      ${line}`).join('\n')
   return [
-    `# 「${name}」的学习 Agent 预设 —— 由 @yiyunet/dsh-learn-skills 生成。`,
+    `# 「${name}」的学习 Agent 预设 —— 由 dsh-learn-skills 生成。`,
     '#',
     '# 本文件是 AGENT 平面组合：roster 把它作为一个 standing scope 挂载一次，',
     '# 每个选择该预设的会话按 scope 父子关系加入。',

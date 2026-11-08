@@ -2,7 +2,7 @@
  * verify-package.mjs —— 发布契约校验（`npm run verify`，CI 会跑）。
  *
  * 校验的不是"代码对不对"，而是**发布形态有没有被破坏**。每条断言都对应一个
- * 真实失败模式（在 `@yiyunet/dsh-dingtalk-connector` 上逐条踩过）：
+ * 真实失败模式（在 `dsh-dingtalk-connector` 上逐条踩过）：
  *
  *   ① 必需文件齐全（源码 + 构建产物 + 文档）
  *   ② 任何依赖节与 lock 文件都不得出现 @deepseek-ai/dsh-*
@@ -202,7 +202,7 @@ const hostIndex = await readIfExists('plugin-src/host/index.mjs') ?? ''
 const hostRpc = await readIfExists('plugin-src/host/rpc.mjs') ?? ''
 
 for (const [label, needle] of [
-  ['装载器 id', '@yiyunet/dsh-learn-skills'],
+  ['装载器 id', 'dsh-learn-skills'],
   ['槽位契约', 'conversation.input.left'],
   ['菜单标题', 'AI学习'],
   ['RPC 端点名', 'dsh-learn-skills'],
@@ -527,10 +527,10 @@ check(typeof manifest?.dsh?.compatibility?.dsh === 'string',
 
 // ── ⑨ cordis.patch.yml 与宿主默认值一致性 ────────────────────────────────
 const patch = await readIfExists('cordis.patch.yml') ?? ''
-check(patch.includes('@yiyunet/dsh-learn-skills'), 'cordis.patch.yml 里没有本包名 —— profile 不会装载它')
+check(patch.includes('dsh-learn-skills'), 'cordis.patch.yml 里没有本包名 —— profile 不会装载它')
 check(/installed: true|-\s*insert:/u.test(patch), 'cordis.patch.yml 结构不对（应含 insert 行）')
 const packageName = manifest?.name
-check(packageName === '@yiyunet/dsh-learn-skills', `包名必须是 @yiyunet/dsh-learn-skills，实得 ${String(packageName)}`)
+check(packageName === 'dsh-learn-skills', `包名必须是 dsh-learn-skills，实得 ${String(packageName)}`)
 
 // ── ⑩ 客户端装配证据：提交必须在 wrapper factory 内部 ──────────────────────
 //
