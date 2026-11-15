@@ -16,9 +16,10 @@ import { homedir } from 'node:os'
 import { collect, audit, renderAuditReport } from './audit.mjs'
 import { readDirectory, readJson, readText, withLock, writeIfChanged } from './fsx.mjs'
 import {
-  CANDIDATE_LIMIT, CANDIDATE_TYPES, DECISION, contentChanged, dedupeCandidates, extractCandidates,
-  findMissingNodes, fixRange, loadNodes as loadNodeFiles, mergeSemanticSuggestions,
-  parseFrontmatter, relateToNodes, renderNode, VERIFICATION,
+  CANDIDATE_LIMIT, CANDIDATE_TYPES, DECISION, VERIFICATION, VERIFICATION_LABEL, contentChanged,
+  dedupeCandidates, extractCandidates, findMissingNodes, fixRange, loadNodes as loadNodeFiles,
+  mergeSemanticSuggestions, normalizeVerification,
+  parseFrontmatter, relateToNodes, renderNode,
 } from './knowledge.mjs'
 import {
   baseOf, candidateId, dateStamp, fingerprint, isoDate, isoTimestamp, nextNodeId,
@@ -1370,6 +1371,25 @@ export function createFlows(options) {
     const LABEL_KEEP = '保留（推荐）'
     const LABEL_EXCLUDE = '排除'
     const LABEL_UNVERIFIED = '标记待验证（本轮不写知识）'
+    // ★ 2026-11-15：把 `VERIFICATION` 另外三级接上入口。
+    //
+    //   为什么挂在「保留」的**变体**上、而不是新增一道题：
+    //     · 裁决卡是"一题一条、点一次自动进下一题"，加题会改问题数量与 id 序列，
+    //       存量脚本按 id 匹配（`review-1`…）会整批落空 —— 那是几十条用例的静默失效；
+    //     · 档位本来就是"保留时的补充说明"，与「保留」同轴，语义上不该另起一题。
+    //
+    //   为什么措辞只写档位名、不写 1/2/3：档位答的是"证据从哪来"，不是"质量多高"。
+    //   一旦能被数出来，就会被拿去排序汇报（详见 `VERIFICATION_LABEL` 的注释）。
+    const LABEL_KEEP_CONFIRMED = '保留 · 我亲自核实过'
+    const LABEL_KEEP_EXTERNAL = '保留 · 有外部证据可回溯'
+    const LABEL_KEEP_FALSIFIED = '保留 · 已被证伪（留档）'
+    /** 由所选项反解验证档位（认不出 ＝ 未验证，保守方向）。 */
+    const verificationOf = picked => {
+      if (picked === LABEL_KEEP_CONFIRMED) return VERIFICATION.userConfirmed
+      if (picked === LABEL_KEEP_EXTERNAL) return VERIFICATION.externallyVerified
+      if (picked === LABEL_KEEP_FALSIFIED) return VERIFICATION.falsified
+      return VERIFICATION.unverified
+    }
     // 一次问多少条：单题只手点一次，故可放宽；仍设上限，避免单张卡过大。
     const REVIEW_CHUNK = 40
     // 准入结果（供上层如实回报）：`null` = 根本没问过准入（旧形态），不假装判过。
@@ -1410,6 +1430,10 @@ export function createFlows(options) {
           { label: LABEL_KEEP, description: candidate.title.slice(0, 40) },
           { label: LABEL_EXCLUDE },
           { label: LABEL_UNVERIFIED },
+          // 以下三项目的是**留证据**，不是加分。「保留」本身永远不等于已证实。
+          { label: LABEL_KEEP_CONFIRMED, description: '你亲手验证过这条成立' },
+          { label: LABEL_KEEP_EXTERNAL, description: '有可回溯出处（官方文档 / 实测记录）' },
+          { label: LABEL_KEEP_FALSIFIED, description: '已知不成立，留档以免下次重复采信' },
           { label: SKIP_OPTION.label },
           { label: CANCEL_SENTINEL, description: '中断裁决；批次已保存，可续办' },
         ],
@@ -1443,8 +1467,9 @@ export function createFlows(options) {
         reviewed.push({
           ...candidate,
           decision: keep ? DECISION.keep : DECISION.exclude,
-          // ★ 用户点了保留 ≠ 已证实。verification 只在用户另外明确时才变，见下。
-          verification: VERIFICATION.unverified,
+          // ★ 用户点了「保留」本身 ≠ 已证实：`verification` 只在**他另外明确选了档位**时才升格。
+          //   未保留的条目一律回落 `unverified` —— 排除项不需要档位。
+          verification: keep ? verificationOf(picked) : VERIFICATION.unverified,
           unverifiedFlag: picked === LABEL_UNVERIFIED || picked === SKIP_OPTION.label,
           ...admitNote === '' ? {} : { note: admitNote, admitted: false, admissionSentence: sentence },
         })
@@ -2059,22 +2084,46 @@ export function createFlows(options) {
     const { existing, beforeText } = plan
     const usedIds = new Set([...(nodes.map(node => node.id)), ...(await storesFor(workspace).known.read()).nodeIds])
     const id = existing?.id ?? nextNodeId(dateStamp(), usedIds)
+    // ★ 验证档位（2026-11-15）：候选把它带到这里，再交给 `renderNode` 落盘。
+    //
+    //   既有节点的规则**不是序数比较**，而是"有没有新信息"：
+    //     · 来的是 `unverified`（没信息）⇒ **不动现状**，否则每次补充都会把
+    //       "有外部证据"的节点降回未验证 —— 一条知识会因为被补充一次而变不可信；
+    //     · 来的是 `falsified` 而现状已有明确档位 ⇒ 也不动：证伪的是**本次新增的这段话**，
+    //       不是整个节点（真要把整节点降格，走「关联升级」的修正/替代语义）。
+    //   无论动不动现状，本次档位都会写进正文的「事实验证」行 —— 信息不丢。
+    const incomingVerification = normalizeVerification(change.candidate.verification)
+    const established = existing !== undefined && normalizeVerification(existing.verification) !== VERIFICATION.unverified
+    const verification = existing === undefined
+      ? incomingVerification
+      : (incomingVerification === VERIFICATION.unverified
+        || (incomingVerification === VERIFICATION.falsified && established)
+        ? normalizeVerification(existing.verification)
+        : incomingVerification)
+    const verificationText = VERIFICATION_LABEL[incomingVerification]
+    // 已被证伪的条目照样落盘，但**不当作可用知识**：状态与"待验证"同级。
+    const isFalsified = verification === VERIFICATION.falsified
     const nextNode = {
       id,
       title: existing?.title ?? change.candidate.title,
-      status: change.relation === 'unverified' || change.candidate.unverifiedFlag === true ? 'unverified' : 'active',
+      status: change.relation === 'unverified' || change.candidate.unverifiedFlag === true || isFalsified
+        ? 'unverified'
+        : 'active',
       version: existing === undefined ? 1 : existing.version,
       updated: isoDate(),
+      verification,
+      verificationBasis: existing?.verificationBasis ?? null,
       tags: [...new Set([...(existing?.tags ?? []), change.candidate.type, ...change.candidate.relations?.map(item => item.relation) ?? []])].filter(tag => CANDIDATE_TYPES.includes(tag) === false || tag !== 'noise'),
       sources: [...new Set([...(existing?.sources ?? []), change.candidate.source.sessionId ?? 'unknown-session'])],
       links: mergeLinks(existing, change.candidate),
       body: existing === undefined
         ? `${change.candidate.summary}\n\n- 来源：会话 ${change.candidate.source.sessionId ?? '未知'}`
           + `${change.candidate.source.precision === 'message' ? ` · 消息 ${change.candidate.source.messageIds.join(', ')}` : ' · （无法精确定位到消息）'}`
-          + `\n- 类型：${change.candidate.type}\n- 事实验证：未验证（用户认可 ≠ 已证实）`
+          + `\n- 类型：${change.candidate.type}\n- 事实验证：${verificationText}`
+          + `${incomingVerification === VERIFICATION.unverified ? '（用户认可 ≠ 已证实）' : ''}`
         : `${existing.body.trimEnd()}\n\n## 更新（${isoDate()}）\n\n${change.candidate.summary}\n\n`
           + `- 变化原因：${change.reason}\n- 来源：会话 ${change.candidate.source.sessionId ?? '未知'}\n`
-          + `- 事实验证：未验证\n`,
+          + `- 事实验证（本次新增内容）：${verificationText}\n`,
     }
     // 内容实际变化才递增版本；重试得到相同内容时版本保持不动。
     if (existing !== undefined && contentChanged(existing, nextNode)) {
@@ -2207,6 +2256,12 @@ export function createFlows(options) {
         id, title: nextNode.title, status: nextNode.status, version: nextNode.version,
         updated: nextNode.updated, tags: nextNode.tags, sources: nextNode.sources,
         links: nextNode.links, body: nextNode.body, relative: change.path,
+        // ⚠️ 逐字段枚举是这里的老毛病：漏一个字段，下游就"看不见"。2026-11-15 实测漏了
+        //    `verification` —— 节点文件明明写着 externally-verified，总索引却刷成「未验证」，
+        //    因为索引是拿这份内存视图渲染的，**不是重读磁盘**。
+        //    **新增 frontmatter 字段时，这里必须同步。**
+        verification: nextNode.verification,
+        verificationBasis: nextNode.verificationBasis,
         sha: decision.action === 'skip' ? fingerprint(beforeText ?? '') : decision.afterSha ?? fingerprint(content),
         raw: decision.action === 'skip' ? beforeText : content,
       },
@@ -2322,11 +2377,13 @@ export function createFlows(options) {
       '',
       '## 节点索引',
       '',
-      '| 节点 id | 标题 | 状态 | 版本 | 更新日 | 来源 |',
-      '|---|---|---|---|---|---|',
+      // ★ 新增列一律**追加在末尾**：`parseFrameworkIndex` 按列位读 `cells[0..5]`，
+      //   插在中间会让后面的列整体错位、且静默读坏。
+      '| 节点 id | 标题 | 状态 | 版本 | 更新日 | 来源 | 验证 |',
+      '|---|---|---|---|---|---|---|',
       ...nodes
         .filter(node => node.status !== 'archived')
-        .map(node => `| ${node.id} | ${node.title} | ${node.status} | ${node.version} | ${node.updated ?? '—'} | ${node.relative} |`),
+        .map(node => `| ${node.id} | ${node.title} | ${node.status} | ${node.version} | ${node.updated ?? '—'} | ${node.relative} | ${VERIFICATION_LABEL[normalizeVerification(node.verification)]} |`),
       '',
     ]
     const content = `${lines.join('\n')}\n`

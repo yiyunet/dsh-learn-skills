@@ -8,10 +8,10 @@ import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 
 import {
-  CANDIDATE_LIMIT, CANDIDATE_TYPES, DECISION, VERIFICATION, candidateScore, classify, contentChanged,
-  dedupeCandidates, extractCandidates, findMissingNodes, fixRange, isNoise, loadNodes,
-  mergeSemanticSuggestions, parseFrameworkIndex, parseFrontmatter, relateToNodes, renderNode,
-  selectTopCandidates,
+  CANDIDATE_LIMIT, CANDIDATE_TYPES, DECISION, VERIFICATION, VERIFICATION_LABEL, candidateScore, classify,
+  contentChanged, dedupeCandidates, extractCandidates, findMissingNodes, fixRange, isNoise, loadNodes,
+  mergeSemanticSuggestions, normalizeVerification, parseFrameworkIndex, parseFrontmatter, relateToNodes,
+  renderNode, selectTopCandidates,
 } from '../plugin-src/host/knowledge.mjs'
 import { readDirectory, readText } from '../plugin-src/host/fsx.mjs'
 import { candidateId, fingerprint } from '../plugin-src/host/paths.mjs'
@@ -360,6 +360,49 @@ describe('frontmatter 与节点渲染', () => {
     assert.equal(parsed.data.id, node.id)
     assert.equal(parsed.data.version, '2')
     assert.deepEqual(parsed.data.tags, node.tags)
+  })
+
+  it('★ 验证档位必须落盘 —— 显示名只给名字、不给序数', () => {
+    // 真实失败模式（2026-11-15 之前）：`renderNode` 只写 8 个字段，`verification` 被丢掉
+    // ⇒ 节点读回来永远是"未验证"，四级档位等于不存在。
+    // 「写了但读不到」与「没写」后果相同，所以这里断言到解析回来为止。
+    const withLevel = renderNode({
+      id: 'LN-20260920-001', title: 'FCC', status: 'active', version: 1, updated: '2026-09-20',
+      tags: [], sources: [], links: [], body: '',
+      verification: VERIFICATION.externallyVerified, verificationBasis: 'FCC 官方页 2026-09',
+    })
+    const parsed = parseFrontmatter(withLevel)
+    assert.equal(parsed.data.verification, 'externally-verified')
+    assert.equal(parsed.data.verificationBasis, 'FCC 官方页 2026-09')
+    // 缺省落 unverified（保守方向），且不留下空的依据行
+    const bare = parseFrontmatter(renderNode({ id: 'LN-20260920-002', title: 'X', updated: '2026-09-20', body: '' }))
+    assert.equal(bare.data.verification, 'unverified')
+    assert.equal(Object.hasOwn(bare.data, 'verificationBasis'), false, '没有依据就不该留空字段')
+    // 显示名是"名字"，不是序号 —— 一旦能被数出来，就会被拿去排序汇报成质量分。
+    assert.equal(VERIFICATION_LABEL[VERIFICATION.externallyVerified], '有外部证据')
+    for (const label of Object.values(VERIFICATION_LABEL)) {
+      assert.doesNotMatch(label, /\d/u, `档位显示名不得含序数：${label}`)
+    }
+  })
+
+  it('★ 只改档位也算内容变化 —— 否则升格不留痕', () => {
+    // 真实失败模式：`contentChanged` 的比较键不含 verification 时，
+    // "未验证 → 有外部证据"这一步不会递增 version，版本记录里什么都看不到。
+    const base = {
+      id: 'LN-20260920-001', title: 'FCC', status: 'active', version: 1, updated: '2026-09-20',
+      tags: [], sources: [], links: [], body: '正文', verification: VERIFICATION.unverified,
+    }
+    assert.equal(contentChanged(base, { ...base, verification: VERIFICATION.userConfirmed }), true)
+    assert.equal(contentChanged(base, { ...base, verificationBasis: '实测记录' }), true)
+    // 对照组：什么都不改 ⇒ 不得误判（否则每次重跑都无故升版本）
+    assert.equal(contentChanged(base, { ...base }), false)
+  })
+
+  it('认不出的档位一律落到 unverified（保守方向：认不出＝不可信）', () => {
+    assert.equal(normalizeVerification('verified'), VERIFICATION.unverified)
+    assert.equal(normalizeVerification(null), VERIFICATION.unverified)
+    assert.equal(normalizeVerification(undefined), VERIFICATION.unverified)
+    assert.equal(normalizeVerification(' externally-verified '), VERIFICATION.externallyVerified)
   })
 
   it('★ 往返必须保住 id —— 节点文件的实际形态（带文件头无 BOM）', () => {

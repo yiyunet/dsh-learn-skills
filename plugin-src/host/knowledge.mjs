@@ -33,6 +33,38 @@ export const VERIFICATION = Object.freeze({
   falsified: 'falsified',
 })
 
+/**
+ * 验证档位的**显示名**（只给名字，不给序数）。
+ *
+ * ★ 为什么刻意不给 1/2/3/4 或百分比：档位描述的是"**证据从哪来**"，不是
+ *   "质量有多高"。一旦排成数，就会被当成质量分去排序、去截图汇报，
+ *   而"用户确认过的推测"未必比"未验证的外部资料"更可靠。
+ *   同一理由下 Dan Koe 的社区修订版把"加总除以十二"的评分删掉了：
+ *   「没有明定决策用途，无法处理未判定象限，且暗示不必要的精确性」。
+ *
+ * ⚠️ `unverified` 的显示名固定为「未验证」—— `flows.mjs` 写节点正文用的是它，
+ *    `test/flows.test.mjs` 有一条逐字断言钉住"事实验证：未验证"，改字会断。
+ */
+export const VERIFICATION_LABEL = Object.freeze({
+  [VERIFICATION.unverified]: '未验证',
+  [VERIFICATION.userConfirmed]: '我确认过',
+  [VERIFICATION.externallyVerified]: '有外部证据',
+  [VERIFICATION.falsified]: '已被证伪',
+})
+
+/**
+ * 把任意输入归一成合法档位。
+ *
+ * ★ 未知一律落到 `unverified`（**保守方向：认不出的，当成不可信**）。
+ *   反向兜底（认不出就当已验证）会让一份手改坏的 frontmatter 直接升格为可信知识。
+ * @param {unknown} value 原始值（frontmatter 字符串或候选字段）
+ * @returns {string} 合法档位
+ */
+export function normalizeVerification(value) {
+  const text = String(value ?? '').trim()
+  return Object.values(VERIFICATION).includes(text) ? text : VERIFICATION.unverified
+}
+
 /** 用户处理决定。 */
 export const DECISION = Object.freeze({
   pending: 'pending',
@@ -628,6 +660,11 @@ export async function loadNodes({ directory, prefix, readText, readDirectory, wa
       tags: Array.isArray(data.tags) ? data.tags : [],
       sources: Array.isArray(data.sources) ? data.sources : [],
       links: Array.isArray(data.links) ? data.links : [],
+      // ★ 旧节点没有这两个字段 ⇒ 档位落 `unverified`、依据落 `null`（保守方向）。
+      verification: normalizeVerification(data.verification),
+      verificationBasis: typeof data.verificationBasis === 'string' && data.verificationBasis.trim() !== ''
+        ? data.verificationBasis.trim()
+        : null,
       body,
       relative,
       sha: fingerprint(text),
@@ -715,11 +752,20 @@ export function findMissingNodes({ frameworkText, nodes, skipped }) {
 }
 
 /**
- * 渲染节点文件：沿用既有字段 `id / title / status / version / updated / tags / sources / links`。
+ * 渲染节点文件：沿用既有字段 `id / title / status / version / updated / tags / sources / links`，
+ * 并落 `verification`（+ 可选 `verificationBasis`）。
+ *
+ * ★ 2026-11-15：`verification` 此前**只活在候选与内存里**，一到写盘就被丢掉 ——
+ *   于是节点文件与总索引都分不出"用户认可的推测"和"外部验证过的事实"，
+ *   而后续会话读到的恰恰只有这两处。本函数是"验证状态能活到下一会话"的唯一出口。
+ *
+ * 旧文件没有该字段时由 `normalizeVerification` 兜底为 `unverified`（保守方向）。
  * @param {object} node 节点
  * @returns {string} 文件内容
  */
 export function renderNode(node) {
+  const verification = normalizeVerification(node.verification)
+  const basis = typeof node.verificationBasis === 'string' ? node.verificationBasis.trim() : ''
   const lines = [
     '---',
     `id: ${node.id}`,
@@ -730,6 +776,9 @@ export function renderNode(node) {
     `tags: ${JSON.stringify(node.tags ?? [])}`,
     `sources: ${JSON.stringify(node.sources ?? [])}`,
     `links: ${JSON.stringify(node.links ?? [])}`,
+    `verification: ${verification}`,
+    // 依据可选：没有就不写这一行，避免留下一串空的 `""`。
+    ...basis === '' ? [] : [`verificationBasis: ${JSON.stringify(basis)}`],
     '---',
     '',
     `# ${node.title}`,
@@ -751,7 +800,11 @@ export function renderNode(node) {
  */
 export function contentChanged(previous, next) {
   if (previous === undefined || previous === null) return true
-  const keys = ['title', 'status', 'tags', 'sources', 'links', 'body']
+  // ★ `verification` / `verificationBasis` 必须在内（2026-11-15）：
+  //   漏了它们会出现"档位从 unverified 变成 externally-verified，版本号却不动"——
+  //   节点的「版本记录」是留痕的唯一依据，版本不动等于这次升格没有发生。
+  // `?? null` 让 `undefined` 与 `null` 等价，避免只差一个空值就误判为内容变化。
+  const keys = ['title', 'status', 'tags', 'sources', 'links', 'body', 'verification', 'verificationBasis']
   for (const key of keys) {
     if (JSON.stringify(previous[key] ?? null) !== JSON.stringify(next[key] ?? null)) return true
   }

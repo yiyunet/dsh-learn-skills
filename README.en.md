@@ -29,6 +29,28 @@ MIT · independent community plugin · **not affiliated with, sponsored by, or e
 
 > **Relation to the older workflow**: the older flow ran the whole pipeline in one click; now the writes in the middle are **tightened to "produce candidates → human verdict → write"**. That is the substantive difference — see [`docs/迁移与兼容.md`](docs/迁移与兼容.md).
 
+## Verification levels on knowledge nodes
+
+**"Keep" does not mean "confirmed."** This has been a line since the first version: `decision` (what you did with it) and `verification` (where the evidence comes from) are **two separate fields**, and no code path may derive one from the other.
+
+Each verdict option maps to exactly one persisted level:
+
+| Verdict option | Persisted `verification` | Meaning |
+|---|---|---|
+| Keep (recommended) | `unverified` | You accept it, but nothing shows it has been verified |
+| Mark as to-be-verified (no knowledge written this round) | `unverified` + `status: unverified` | Do not treat it as knowledge yet |
+| Keep · I checked this myself | `user-confirmed` | You personally verified it holds |
+| Keep · There is traceable external evidence | `externally-verified` | A source exists (official doc / measured record) |
+| Keep · Known to be false (kept on file) | `falsified` | Shown not to hold, **kept so it is not believed again** |
+
+Three behavioural rules:
+
+- **Levels survive into later sessions** — they are written into the node `frontmatter` and into the index's "Verification" column. **Nodes without the field are treated as `unverified`** (conservative: unrecognised means untrusted).
+- **A supplement never downgrades** — adding an "unverified" item to a node already marked as externally verified leaves the node's level alone (`unverified` means "no information", not "one step lower"); the incoming level is still recorded in the body.
+- **A level is not a score** — the labels carry no ordinals and nothing is sorted by them. They answer "where did the evidence come from", not "how good is it": a user-confirmed guess is not necessarily more reliable than unverified external material.
+
+Claims known to be false are **still written to disk**, simply never with `status: active`. Deleting them means the same wrong claim gets believed again next time.
+
 ## What it guarantees, and what it does not
 
 | | Content |

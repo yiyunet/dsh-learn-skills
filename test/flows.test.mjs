@@ -909,6 +909,78 @@ describe('入口三 · 关联升级', () => {
     assert.equal(existsSync(join(ws, nodes[0].relative)), false, '回滚后新建节点应被删除')
   })
 
+  // ── 验证档位落盘（2026-11-15）─────────────────────────────────────────────
+  //
+  // 这一组治的是同一个病：`VERIFICATION` 定义了四级，但只有 `unverified` 可达；
+  // 且 `renderNode` 写盘时把它整个丢掉 —— 于是节点文件与总索引都分不出
+  // "用户认可的推测"和"外部验证过的事实"，而后续会话读到的恰恰只有这两处。
+  // 「写了但读不到」与「没写」后果相同，所以每条都断言到**落盘产物**为止。
+
+  it('★ 档位能活到下一会话：选「有外部证据」⇒ frontmatter 与索引都落盘', async () => {
+    const ws = await freshDir(join(root, 'ws-verify-external'))
+    const pick = { answers: [{ id: 'r', selected: ['保留 · 有外部证据可回溯'], custom: '' }] }
+    const { flows } = harness({ workspace: ws, messages, answers: [pick, pick, pick] })
+    await flows.distill({ sessionId: 'session-test' })
+    const result = await flows.upgrade({ sessionId: 'session-test', confirmWrite: true })
+    assert.equal(result.ok, true, `写入失败：${JSON.stringify(result).slice(0, 300)}`)
+    const relative = result.done.find(item => item.relative.includes('knowledge/nodes/')).relative
+    const content = await readFile(join(ws, relative), 'utf8')
+    assert.match(content, /verification: externally-verified/u, `档位没落盘：\n${content.slice(0, 400)}`)
+    // 正文也要如实写出来 —— 人先看正文，再看 frontmatter。
+    assert.match(content, /事实验证：有外部证据/u)
+    // 已标注外部证据，就不该再套"用户认可 ≠ 已证实"那句免责语（否则升格等于没升）。
+    assert.doesNotMatch(content, /用户认可 ≠ 已证实/u)
+    const framework = await readFile(join(ws, 'knowledge/framework.md'), 'utf8')
+    assert.match(framework, /\| 有外部证据 \|/u, '总索引的「验证」列没跟上')
+  })
+
+  it('★ 已被证伪：留档但状态不是 active —— 证伪 ≠ 删除', async () => {
+    // 删掉一条错结论，下次就会重新采信它；所以必须留档，但绝不能标成可用知识。
+    const ws = await freshDir(join(root, 'ws-verify-falsified'))
+    const pick = { answers: [{ id: 'r', selected: ['保留 · 已被证伪（留档）'], custom: '' }] }
+    const { flows } = harness({ workspace: ws, messages, answers: [pick, pick, pick] })
+    await flows.distill({ sessionId: 'session-test' })
+    const result = await flows.upgrade({ sessionId: 'session-test', confirmWrite: true })
+    assert.equal(result.ok, true, `写入失败：${JSON.stringify(result).slice(0, 300)}`)
+    const relative = result.done.find(item => item.relative.includes('knowledge/nodes/')).relative
+    const content = await readFile(join(ws, relative), 'utf8')
+    assert.match(content, /verification: falsified/u)
+    assert.match(content, /事实验证：已被证伪/u)
+    assert.match(content, /status: unverified/u, '被证伪的结论不得标成 active')
+  })
+
+  it('★ 补充既有节点时，档位不因「未验证」的补充而降级', async () => {
+    // `unverified` 的语义是"**没有信息**"，不是"低一档"。若把补充当成降级指令，
+    // 一条有外部证据的知识会因为被补充一次而变回不可信 —— 那是越用越差。
+    const ws = await freshDir(join(root, 'ws-verify-nodowngrade'))
+    await mkdir(join(ws, 'knowledge/nodes'), { recursive: true })
+    await mkdir(join(ws, 'inbox'), { recursive: true })
+    await mkdir(join(ws, '.dsh/learn-skills'), { recursive: true })
+    const nodeId = 'LN-20260920-001'
+    const rel = `knowledge/nodes/${nodeId}-fcc.md`
+    await writeFile(join(ws, rel), [
+      '---', `id: ${nodeId}`, 'title: 北美站合规要求', 'status: active', 'version: 1',
+      'updated: 2026-09-20', 'tags: ["fact"]', 'sources: ["s1"]', 'links: []',
+      'verification: externally-verified', '---', '', '正文', '',
+    ].join('\n'), 'utf8')
+    await writeFile(join(ws, 'knowledge/framework.md'), [
+      '# 知识框架', '', '## 节点索引', '',
+      '| 节点 id | 标题 | 状态 | 版本 | 更新日 | 来源 | 验证 |',
+      '|---|---|---|---|---|---|---|',
+      `| ${nodeId} | 北美站合规要求 | active | 1 | 2026-09-20 | ${rel} | 有外部证据 |`,
+      '',
+    ].join('\n'), 'utf8')
+    await plantBatch(ws, '002', nodeId, '补充：还需标注 FCC ID 的位置')
+    const keepAll = { answers: [{ id: 'r', selected: ['全部保留'], custom: '' }] }
+    const { flows } = harness({ workspace: ws, messages, answers: [keepAll, keepAll, keepAll] })
+    const result = await flows.upgrade({ sessionId: 'session-test', confirmWrite: true })
+    assert.equal(result.ok, true, `写入失败：${JSON.stringify(result).slice(0, 300)}`)
+    const content = await readFile(join(ws, rel), 'utf8')
+    assert.match(content, /verification: externally-verified/u, '档位被「未验证」的补充降级了')
+    // 但本次补充的档位必须如实记进正文 —— 不动现状 ≠ 不记录。
+    assert.match(content, /事实验证（本次新增内容）：未验证/u)
+  })
+
   it('重跑同一批不会重复递增版本（内容相同即 skip）', async () => {
     const ws = await freshDir(join(root, 'ws-up-idem'))
     // 两次 upgrade（出计划 / 确认写入）各要一次裁决。
