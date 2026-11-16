@@ -6,6 +6,7 @@
  *   batches.json  已处理批次账（跨会话续办与"不重复创建候选"的唯一依据）
  *   audit.json    上次成功保存的体检基线（缺失即"首次，无历史基线"）
  *   known.json    已分配过的节点 id、预设占用记录、**我方上次写入的指纹**（id 不回收）
+ *   memory.json   纵向记忆（核心问题 / 承诺 / 做到没做到；**默认关闭**，见 MemoryStore）
  *
  * @module dsh-learn-skills/status
  */
@@ -351,4 +352,91 @@ export async function openJournal(stateRoot, batchId, meta) {
     journal.entries = []
   }
   return journal
+}
+
+// ── 纵向记忆（**默认关闭**）──────────────────────────────────────────────
+
+/** 单段记忆文字的上限（防止把整段对话倒进来）。 */
+const MEMORY_TEXT_MAX = 400
+
+/** 最多保留多少条进度（超出丢最旧的：记忆是摘要，不是归档）。 */
+export const MEMORY_ENTRY_LIMIT = 50
+
+/**
+ * 把任意输入压成一段可存进记忆的短文本。
+ * 空白折叠、超长截断（**截断留省略号，不静默丢**）。
+ * @param {unknown} value 原始输入
+ * @returns {string|null} 干净文本；空串归一为 null（"没填"与"填了空"不是一回事）
+ */
+function memoryText(value) {
+  const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
+  if (text === '') return null
+  return text.length <= MEMORY_TEXT_MAX ? text : `${text.slice(0, MEMORY_TEXT_MAX - 1)}…`
+}
+
+/** 文本数组去空、去重、限长。 */
+function memoryList(value) {
+  const list = Array.isArray(value) ? value : (value === undefined || value === null ? [] : [value])
+  return [...new Set(list.map(memoryText).filter(item => item !== null))]
+}
+
+/**
+ * 纵向记忆：核心问题 / 承诺 / 做到没做到。
+ *
+ * ★ 为什么它**不是**第二个 `audit.json` 基线：
+ *   `audit.json` 记的是**文件内容指纹**，答的是"结构变没变"；
+ *   这里记的是**用户说过什么**，答的是"上次那件事后来怎么样了"。
+ *   两者混存，会让"基线变了"与"用户改主意了"无法区分。
+ *
+ * ★ 为什么默认关闭（要 `allowMemory: true` 才写）：它记的是**关于用户**的内容，
+ *   属数据面扩张。与 `allowBehaviorRules` 同一姿势 —— 一条记录被写下，
+ *   不等于它应当被长期保留。关闭时本 Store **永远不落盘**（连目录都不碰）。
+ *
+ * ⚠️ 记忆是**摘要不是归档**：条目超上限丢最旧、单段文字超长截断。
+ *   要留全文请放 `reports/`，那是用户的资产，本插件不接管。
+ */
+export class MemoryStore {
+  /** @param {{ stateRoot: string }} options 路径 */
+  constructor(options) {
+    this.path = `${options.stateRoot}/memory.json`
+  }
+
+  /**
+   * 读记忆。
+   * @returns {Promise<{label: string|null, baseline: object|null, entries: object[], savedAt: string|null}|undefined>}
+   *   结构不认识（版本不符/坏 JSON）⇒ `undefined`，**不硬套**
+   */
+  async read() {
+    const raw = await readJson(this.path)
+    if (raw === undefined || raw?.version !== STATE_VERSION) return undefined
+    return {
+      label: memoryText(raw.label),
+      baseline: raw.baseline !== null && typeof raw.baseline === 'object' ? raw.baseline : null,
+      entries: Array.isArray(raw.entries) ? raw.entries : [],
+      savedAt: typeof raw.savedAt === 'string' ? raw.savedAt : null,
+    }
+  }
+
+  /**
+   * 写记忆（覆盖整份）。调用方负责先 `read` 再合并 —— Store 不猜意图。
+   *
+   * 条目超上限时**丢最旧的**，并在顶层记 `dropped` 供如实回报：
+   *   "少了 N 条"必须能被看见，不能悄悄消失。
+   * @param {{ label?: string|null, baseline?: object|null, entries?: object[] }} memory 记忆
+   * @returns {Promise<{dropped: number, kept: number}>} 落盘结果
+   */
+  async save(memory) {
+    const entries = Array.isArray(memory.entries) ? memory.entries : []
+    const dropped = Math.max(0, entries.length - MEMORY_ENTRY_LIMIT)
+    const kept = dropped === 0 ? entries : entries.slice(dropped)
+    await writeFileAtomic(this.path, `${JSON.stringify({
+      version: STATE_VERSION,
+      savedAt: isoTimestamp(),
+      label: memoryText(memory.label),
+      baseline: memory.baseline ?? null,
+      droppedTotal: dropped,
+      entries: kept,
+    }, null, 2)}\n`)
+    return { dropped, kept: kept.length }
+  }
 }

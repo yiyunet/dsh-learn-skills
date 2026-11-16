@@ -30,7 +30,7 @@ import {
   createPreset, discoverPresetNames, draftQuestion, draftQuestions, extractTopicMap, installInstructions,
   parseThreePart, renderPresetBody, renderPreview, scaffoldWorkspace, validateAnswers,
 } from './preset.mjs'
-import { BatchesStore, BaselineStore, KnownStore, SessionStore, isBatchId, journalPath, openJournal } from './status.mjs'
+import { BatchesStore, BaselineStore, KnownStore, MEMORY_ENTRY_LIMIT, MemoryStore, SessionStore, isBatchId, journalPath, openJournal } from './status.mjs'
 import { MIN_ROUNDS, generateSemanticSuggestions, generateThemeMap } from './model.mjs'
 import { redact } from './redact.mjs'
 import { batchChoice, distillEmptyReason, distillOverview, plainText } from './ui-text.mjs'
@@ -109,6 +109,10 @@ export function createFlows(options) {
 
   const writeEnabled = config.allowWrite !== false
   const behaviorRulesEnabled = config.allowBehaviorRules === true
+  // ★ 纵向记忆**默认关闭**（2026-11-15 老板批"按你的建议"，建议即默认关闭、显式开启）：
+  //   它记的是"关于用户"的内容，属数据面扩张。与 `behaviorRulesEnabled` 同一姿势 ——
+  //   一条记录被写下，不等于它应当被长期保留。
+  const memoryEnabled = config.allowMemory === true
 
   const logger = ctx?.logger
   const log = (level, message) => {
@@ -403,6 +407,7 @@ export function createFlows(options) {
         batches: new BatchesStore({ stateRoot: `${workspace}/${directories.stateDir}` }),
         baseline: new BaselineStore({ stateRoot: `${workspace}/${directories.stateDir}` }),
         known: new KnownStore({ stateRoot: `${workspace}/${directories.stateDir}` }),
+        memory: new MemoryStore({ stateRoot: `${workspace}/${directories.stateDir}` }),
       })
     }
     return sessions.get(workspace)
@@ -2710,7 +2715,174 @@ export function createFlows(options) {
     }
   }
 
-  return { init, installPreset, distill, upgrade, runAudit, saveAudit, rollback, status, directories, presetDir, presetRootFor }
+  // ── 附加动作：纵向记忆（`/learn memory`）────────────────────────────────
+  //
+  // ★ 为什么做成**命令**而不是第五入口：四入口（init / distill / upgrade / audit）
+  //   是与 client UI、双语门面、契约断言绑定在一起的公开面；记忆是"配一个开关才用"的
+  //   附加动作，与 `rollback` 同级。加第五入口要牵动 42KB 的客户端实现与断言组 ——
+  //   成本与其价值不成比例。
+  //
+  // ★ 为什么默认关闭：见 `memoryEnabled`。关闭时本函数**在读写之前就返回**，
+  //   memory.json 连同目录都不会被创建 —— "只是想看看"也不该产生文件。
+
+  /** 记忆卡里几个占位选项的固定文案（要能被反解，不能靠猜）。 */
+  const MEMORY_LABEL_SAME = '还是这件，没变'
+  const MEMORY_LABEL_NONE_DONE = '暂时没有'
+  const MEMORY_LABEL_NONE_BROKEN = '没有，都做到了'
+
+  /** 取一题的答案：优先自由文本，其次选中项；占位项归空。 */
+  function memoryAnswer(answers, id, placeholders = []) {
+    const answer = (answers ?? []).find(item => item?.id === id)
+    const value = answerValue(answer)
+    return placeholders.includes(value) ? '' : value
+  }
+
+  /** 把一段文本切成多条（逗号 / 顿号 / 分号 / 换行都算分隔）。 */
+  function splitList(text) {
+    return String(text ?? '')
+      .split(/[，,、;；\n]/u)
+      .map(item => item.trim())
+      .filter(item => item !== '')
+  }
+
+  /** 记忆的展示文本（命令侧直接渲染 `message`）。 */
+  function describeMemory(current) {
+    if (current === undefined || current === null) {
+      return {
+        exists: false,
+        count: 0,
+        message: '还没有记忆。用 `/learn memory record` 记第一条（关掉开关就不写文件）。',
+      }
+    }
+    const lines = []
+    if (current.baseline !== null) {
+      lines.push(`核心问题（${current.baseline.date ?? '—'}）：${current.baseline.coreProblem ?? '（未记录）'}`)
+    }
+    const latest = current.entries.at(-1)
+    if (latest !== undefined && latest !== null) {
+      // ⚠️ 逐字段兜底：memory.json 是**人可读写的普通 JSON**，手改坏一个字段
+      //    不该让整条命令崩掉。缺字段就当空，缺到连日期都没有也照样展示。
+      const done = Array.isArray(latest.done) ? latest.done : []
+      const broken = Array.isArray(latest.broken) ? latest.broken : []
+      lines.push(`最近一次（${latest.date ?? '—'}）：`)
+      if (done.length > 0) lines.push(`  做到的：${done.join('；')}`)
+      if (broken.length > 0) lines.push(`  **没守的承诺**：${broken.join('；')}`)
+      if (typeof latest.next === 'string' && latest.next !== '') lines.push(`  下一步：${latest.next}`)
+    }
+    lines.push(`共 ${current.entries.length} 条进度（只留最近 ${MEMORY_ENTRY_LIMIT} 条）。`)
+    return {
+      exists: true,
+      count: current.entries.length,
+      baseline: current.baseline,
+      latest: latest ?? null,
+      message: lines.join('\n'),
+    }
+  }
+
+  /**
+   * 纵向记忆：读 / 记。
+   * @param {{ sessionId: string, action?: 'show'|'record', signal?: AbortSignal, hooks?: object }} request 请求
+   * @returns {Promise<object>} 结果
+   */
+  async function memory(request = {}) {
+    const target = await resolveTarget(request.sessionId)
+    if (target.workspace === null || target.workspace === undefined) {
+      return { ok: false, code: 'NO_WORKSPACE', message: '当前会话未绑定工作区，记忆无处可存。' }
+    }
+    if (!memoryEnabled) {
+      return {
+        ok: false,
+        code: 'MEMORY_DISABLED',
+        message: '纵向记忆**默认关闭** —— 它记的是「关于你」的内容，属数据面扩张。'
+          + '要用请在 `cordis.patch.yml` 里把 `allowMemory` 设为 `true`，重启 Host 后生效。',
+      }
+    }
+    const store = storesFor(target.workspace)
+    const current = await store.memory.read()
+    const relative = store.memory.path.replace(`${target.workspace}/`, '')
+
+    if ((request.action ?? 'show') === 'show') {
+      return { ok: true, action: 'show', path: relative, ...describeMemory(current) }
+    }
+    if (!writeEnabled) {
+      return { ok: false, code: 'WRITE_DISABLED', message: '写门禁关闭（allowWrite: false），记忆不写盘。' }
+    }
+
+    const previous = current?.baseline?.coreProblem ?? null
+    const nav = [{ label: CANCEL_SENTINEL, description: '中断；记忆不改动' }]
+    const questions = [
+      {
+        id: 'core',
+        header: '记忆 · 核心问题',
+        question: previous === null ? '你现在最想解决的那一件事，一句话说完。' : `上次的核心问题：${oneLine(previous, 36)}`,
+        detail: '这句话会出现在下次会话的开场，让助手不必等你重复交代。没变就选第一项。',
+        options: previous === null
+          ? nav
+          : [{ label: MEMORY_LABEL_SAME, description: oneLine(previous, 36) }, ...nav],
+        multiSelect: false,
+      },
+      {
+        id: 'done',
+        header: '记忆 · 做到了什么',
+        question: '上次说过要做的事，哪些真的做到了？',
+        detail: '多条用逗号分隔。没有就选第一项 —— 空着也照样记。',
+        options: [{ label: MEMORY_LABEL_NONE_DONE }, ...nav],
+        multiSelect: false,
+      },
+      {
+        id: 'broken',
+        header: '记忆 · 没守的承诺',
+        question: '哪些说过要做、实际没做？',
+        detail: '这一栏是整份记忆里最有用的一栏：不记它，「下次别再这样」就没有依据。',
+        options: [{ label: MEMORY_LABEL_NONE_BROKEN }, ...nav],
+        multiSelect: false,
+      },
+      {
+        id: 'next',
+        header: '记忆 · 下一步',
+        question: '接下来第一个动作是什么？',
+        detail: '一句话、能直接做。下次会话从这里接着走。',
+        options: nav,
+        multiSelect: false,
+      },
+    ]
+    const asked = await ask(questions, request.signal, { ...request.hooks, sessionId: request.sessionId })
+    if (asked.kind === 'cancelled') {
+      return { ok: false, code: 'FLOW_CANCELLED', message: '已取消 —— 记忆没有任何改动。' }
+    }
+
+    const core = memoryAnswer(asked.answers, 'core')
+    const entry = {
+      recordedAt: isoTimestamp(),
+      date: isoDate(),
+      coreProblem: core === MEMORY_LABEL_SAME ? previous : (core === '' ? previous : core),
+      done: splitList(memoryAnswer(asked.answers, 'done', [MEMORY_LABEL_NONE_DONE])),
+      broken: splitList(memoryAnswer(asked.answers, 'broken', [MEMORY_LABEL_NONE_BROKEN])),
+      next: memoryAnswer(asked.answers, 'next'),
+    }
+    const entries = [...(current?.entries ?? []), entry]
+    const baseline = current?.baseline ?? {
+      recordedAt: entry.recordedAt,
+      date: entry.date,
+      coreProblem: entry.coreProblem,
+      nextActions: entry.next === '' ? [] : [entry.next],
+    }
+    const saved = await store.memory.save({ label: current?.label ?? null, baseline, entries })
+    const created = current?.baseline === null || current?.baseline === undefined
+    return {
+      ok: true,
+      action: 'record',
+      path: relative,
+      baselineCreated: created,
+      count: saved.kept,
+      dropped: saved.dropped,
+      message: `记忆已更新（${saved.kept} 条）。`
+        + `${created ? '已建立基线 —— 下次会话可直接从这里接着走。' : ''}`
+        + `${saved.dropped > 0 ? `⚠️ 超出上限，丢弃最旧 ${saved.dropped} 条（记忆是摘要不是归档，全文请放 reports/）。` : ''}`,
+    }
+  }
+
+  return { init, installPreset, distill, upgrade, runAudit, saveAudit, rollback, memory, status, directories, presetDir, presetRootFor }
 }
 
 /**

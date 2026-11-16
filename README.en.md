@@ -51,6 +51,25 @@ Three behavioural rules:
 
 Claims known to be false are **still written to disk**, simply never with `status: active`. Deleting them means the same wrong claim gets believed again next time.
 
+## Longitudinal memory (off by default)
+
+The four entries manage *knowledge*. This one manages "**what happened to the thing you said last time**" — what you set out to solve, what you promised, and whether the assistant can recall any of it without you repeating yourself.
+
+It is **off by default** because it records **content about you**, which widens the data surface. Same posture as `allowBehaviorRules`: a record being written does not mean it should be kept indefinitely.
+
+```sh
+/learn memory          # show: core problem / done / broken commitments / next step
+/learn memory record   # record one entry (four questions; the first also creates the baseline)
+```
+
+Stored at `<workspace>/.dsh/learn-skills/memory.json`, capped at 50 entries; the oldest are dropped past the cap and the number dropped is **reported honestly** (memory is a digest, not an archive — put full text in `reports/`).
+
+To enable: set `allowMemory: true` in `cordis.patch.yml` and restart the Host. While off, `/learn memory` only answers "off by default + how to turn it on", and **never creates `memory.json`** — merely looking should not produce data.
+
+> **The mechanism that makes it work is not the command.** A command alone is useless if nobody remembers to run it. So the preset body and the workspace `AGENTS.md` both state: **read `memory.json` at the start of every session** (skip it if it does not exist), and **do not wait for the user to remind you what was said last time**.
+>
+> It is **not a fifth entry**: memory is an add-on gated by a config switch, on the same level as `/learn rollback` — so the UI, the entry table, and the contract assertions stay untouched.
+
 ## What it guarantees, and what it does not
 
 | | Content |
@@ -232,6 +251,7 @@ Every field in `cordis.patch.yml` carries a Chinese comment. Two defaults matter
 ```yaml
 allowWrite: true           # master switch; when off all four entries become read-only (init only previews)
 allowBehaviorRules: false  # behavior rules (preset prompts / AGENTS.md / skills) are not permitted by default
+allowMemory: false         # longitudinal memory (/learn memory) is off by default
 ```
 
 The second is deliberate: **knowledge being accepted does not make it a standing instruction**. Changes that affect agent behavior require a human to explicitly open this switch before the relate & upgrade confirmation will execute them.

@@ -1982,3 +1982,73 @@ describe('回滚安全 —— 变更日志是不可信输入（测评 #1321 的 
   })
 })
 
+
+// ── 附加动作 · 纵向记忆（二期 C，**默认关闭**）─────────────────────────────
+//
+// 治的病：用户上次说过"最想解决什么""承诺做什么"，下次会话助手完全不记得，
+// 于是每次都要重新交代背景 —— 而这恰恰是"知识可复用"这个目的里最日常的一段。
+// 三条断言各自对应一个真实失败模式：
+//   ① 关着的时候**连文件都不许建**（"只是想看看"不该产生数据）；
+//   ② 开着的时候基线必须落盘、且 show 能读回（写了读不到＝没写）；
+//   ③ 没有记忆时如实说"还没有"，不许编一条出来。
+describe('附加动作 · 纵向记忆（默认关闭）', () => {
+  const memoryFile = ws => join(ws, '.dsh/learn-skills/memory.json')
+
+  it('★ 默认关闭：不读也不写，并给出开启方式', async () => {
+    const ws = await freshDir(join(root, 'ws-memory-off'))
+    const { flows } = harness({ workspace: ws, noMessages: true })
+    const result = await flows.memory({ sessionId: 'session-test' })
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'MEMORY_DISABLED')
+    assert.match(result.message, /allowMemory/u, '必须告诉用户怎么开')
+    assert.equal(existsSync(memoryFile(ws)), false, '关闭时不得创建记忆文件')
+  })
+
+  it('★ 开启后：record 建基线并落盘，show 能读回（含"没守的承诺"）', async () => {
+    const ws = await freshDir(join(root, 'ws-memory-on'))
+    const form = {
+      answers: [
+        { id: 'core', selected: [], custom: '把北美站的合规问题理清楚' },
+        { id: 'done', selected: [], custom: '整理了 12 条类目要求' },
+        { id: 'broken', selected: [], custom: '没有按周更新索引' },
+        { id: 'next', selected: [], custom: '先补一条 FCC 标识的节点' },
+      ],
+    }
+    const { flows } = harness({ workspace: ws, noMessages: true, config: { allowMemory: true }, answers: [form] })
+    const recorded = await flows.memory({ sessionId: 'session-test', action: 'record' })
+    assert.equal(recorded.ok, true, `记录失败：${JSON.stringify(recorded).slice(0, 300)}`)
+    assert.equal(recorded.baselineCreated, true, '第一条必须同时建立基线，否则下次没有"上次"可读')
+    assert.equal(existsSync(memoryFile(ws)), true)
+    const saved = JSON.parse(await readFile(memoryFile(ws), 'utf8'))
+    assert.equal(saved.baseline.coreProblem, '把北美站的合规问题理清楚')
+    assert.deepEqual(saved.entries[0].broken, ['没有按周更新索引'])
+    assert.equal(saved.entries[0].next, '先补一条 FCC 标识的节点')
+
+    const shown = await flows.memory({ sessionId: 'session-test' })
+    assert.equal(shown.ok, true)
+    assert.equal(shown.exists, true)
+    assert.equal(shown.count, 1)
+    assert.match(shown.message, /没守的承诺/u, '这一栏是整份记忆里最有用的一栏，必须出现在展示里')
+    assert.match(shown.message, /没有按周更新索引/u)
+  })
+
+  it('还没有记忆时如实说「还没有」，且不创建文件', async () => {
+    const ws = await freshDir(join(root, 'ws-memory-empty'))
+    const { flows } = harness({ workspace: ws, noMessages: true, config: { allowMemory: true } })
+    const shown = await flows.memory({ sessionId: 'session-test' })
+    assert.equal(shown.ok, true)
+    assert.equal(shown.exists, false)
+    assert.match(shown.message, /还没有记忆/u)
+    assert.equal(existsSync(memoryFile(ws)), false, '"看"不该产生文件')
+  })
+
+  it('取消记忆卡 ⇒ 记忆零改动（不写半份）', async () => {
+    const ws = await freshDir(join(root, 'ws-memory-cancel'))
+    const cancelled = { answers: [{ id: 'core', selected: [CANCEL_SENTINEL], custom: '' }] }
+    const { flows } = harness({ workspace: ws, noMessages: true, config: { allowMemory: true }, answers: [cancelled] })
+    const result = await flows.memory({ sessionId: 'session-test', action: 'record' })
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'FLOW_CANCELLED')
+    assert.equal(existsSync(memoryFile(ws)), false, '取消不得留下半份记忆')
+  })
+})

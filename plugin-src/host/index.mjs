@@ -36,7 +36,7 @@ export const name = 'learn-skills'
 export const inject = ['userQuestions', 'commands']
 
 /** 插件版本（status 回显与报告用；与 package.json 一致，由 `verify-package.mjs` 断言）。 */
-const VERSION = '2.3.0'
+const VERSION = '2.4.0'
 
 /** 命令名（斜杠后的名字）。 */
 const COMMAND = 'learn'
@@ -248,7 +248,8 @@ export function apply(ctx, config = {}) {
               '',
               '附加动作：/learn rollback <批次号> [--dry-run] —— 回滚某个变更批次（不覆盖你此后新增的修改）',
               '　　　　　加 --dry-run 只列出将要删除/还原的文件（含绝对路径），不做任何改动',
-              '完整用法：/learn init ｜ /learn distill ｜ /learn upgrade [批次号] ｜ /learn audit ｜ /learn rollback <批次号> [--dry-run]',
+              '附加动作：/learn memory [record] —— 看/记纵向记忆（核心问题、承诺、做到没做到）；**默认关闭**，需在配置里把 allowMemory 设为 true',
+              '完整用法：/learn init ｜ /learn distill ｜ /learn upgrade [批次号] ｜ /learn audit ｜ /learn rollback <批次号> [--dry-run] ｜ /learn memory [record]',
             ].join('\n'),
           }
         }
@@ -273,6 +274,14 @@ export function apply(ctx, config = {}) {
             }
           }
           const result = await flows.rollback({ sessionId, batchId, dryRun })
+          return { kind: result?.ok === false ? 'error' : 'success', text: renderForText(result) }
+        }
+        // ★ `memory` 同样**不是**第五个入口，而是与 `rollback` 同级的附加动作 ——
+        //   四入口是与 UI / 双语门面 / 契约断言绑定的公开面，记忆是"配开关才用"的。
+        //   ⚠️ 同样必须在 `ENTRIES.find` **之前**，否则永远走不到。
+        if (entryName === 'memory') {
+          const action = args.trim() === 'record' ? 'record' : 'show'
+          const result = await flows.memory({ sessionId, action })
           return { kind: result?.ok === false ? 'error' : 'success', text: renderForText(result) }
         }
         const entry = ENTRIES.find(item => item.id === entryName || item.label === entryName)
